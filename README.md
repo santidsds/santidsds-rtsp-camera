@@ -1,6 +1,6 @@
 # RTSP Camera for Omarchy
 
-Bar plugin for [Omarchy](https://omarchy.org) (Arch Linux + Quickshell) that
+Bar plugin for [Omarchy](https://omarchy.org) that
 shows RTSP camera feeds in a themed, pinnable card on your desktop.
 
 ![RTSP Camera with the new header and Hackerman overlay](docs/assets/showcase.png)
