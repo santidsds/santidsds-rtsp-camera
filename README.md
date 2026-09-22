@@ -1,6 +1,7 @@
 # RTSP Camera for Omarchy
 
-View your RTSP cameras from the Omarchy bar in Omarchy Style, with live theme
+View your RTSP cameras from the bar of [Omarchy](https://omarchy.org) — an
+Arch Linux desktop distribution — in Omarchy Style, with live theme
 preview configurations, cool effects, overlays, a pinnable, resizable viewer
 that you can move around your screen and pin to stay on top of your other apps,
 and a motion-still gallery of the last 24 hours.
@@ -143,18 +144,26 @@ streaming model or the settings format.
   `position-*.json`, `.profiles.lock`, and `.status.json` so local state can
   never be committed by mistake.
 
-## Credits / based on
+## Fork / credits
 
-This repository is an interactive adaptation of
+This repository (**[santidsds/santidsds-rtsp-camera](https://github.com/santidsds/santidsds-rtsp-camera)**)
+is a public fork-style adaptation of
 [`Yani3rt/rtsp-camera-plugin`](https://github.com/Yani3rt/rtsp-camera-plugin)
-by **Yani (Yaniert Pascual)**.
+by **Yani (Yaniert Pascual)** — the original author and maintainer of the
+upstream project.
 
 The original project supplied the RTSP bar widget, multi-camera profiles,
 pinnable/resizable viewer, reconnect logic, video themes, and overlays. I
-interacted over that implementation — restyling the header and controls,
-adding the motion-still gallery and listener, fixing Omarchy control-type
-shadowing, and extending the pinned input mask — and am publishing the result
-as a public fork under the same MIT license.
+(**Santiago Da Silva / santidsds**) interacted over that implementation —
+restyling the header and controls, adding the motion-still gallery and
+listener, fixing Omarchy control-type shadowing, and extending the pinned
+input mask — and am publishing the result under the same MIT license to
+establish my authorship of the design and functionality changes, without
+claiming the original work.
+
+This is a plugin for **Omarchy OS**, an **Arch Linux** distribution (Quickshell
+/ Qt 6 desktop shell). It is not a standalone app and is not tied to other
+distros unless they ship the same Omarchy plugin stack.
 
 If you only need the original, install upstream:
 
@@ -242,10 +251,10 @@ decoding cost. A working Qt Quick GPU backend is required for filtered styles.
 
 ## Install
 
-Install and enable from this repository (replace with your fork URL after push):
+Install and enable from this repository:
 
 ```sh
-omarchy plugin add <this-repo-url>.git --enable
+omarchy plugin add https://github.com/santidsds/santidsds-rtsp-camera.git --enable
 ```
 
 Upstream original:
@@ -337,7 +346,9 @@ camera settings.
 
 ## License
 
-[MIT](LICENSE), copyright the original author (Yani) and contributors.
+[MIT](LICENSE). Original work © **Yani (Yaniert Pascual)** —
+[`Yani3rt/rtsp-camera-plugin`](https://github.com/Yani3rt/rtsp-camera-plugin).
+Design and functionality changes in this fork © **Santiago Da Silva (santidsds)**.
 The adapted Omarchy popup retains its original attribution in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The preview recording and still
 image show the original owner's pixelated camera feed, shared with permission.
