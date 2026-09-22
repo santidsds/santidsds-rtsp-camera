@@ -15,6 +15,8 @@ Panel {
     property var anchorItem: null
     property var hostWidget: null
     property bool configuring: true
+    property bool showingMotion: false
+    property bool fullscreen: false
     property bool pinned: false
     property bool configured: false
     property var cameras: []
@@ -45,12 +47,43 @@ Panel {
     property var config: ({url: "rtsp://", username: "", password: ""})
     readonly property color foreground: bar ? bar.foreground : Color.foreground
     readonly property string configPath: (Quickshell.env("XDG_CONFIG_HOME") || Quickshell.env("HOME") + "/.config") + "/rtsp-camera/config.json"
-    readonly property bool streaming: opened && !configuring && configured
+    readonly property bool streaming: opened && !configuring && !showingMotion && configured
     readonly property bool live: streaming && frameWatchdog.running
         && player.playbackState === MediaPlayer.PlayingState
 
+    function openMotionGallery() {
+        if (!configured) return
+        editingAppearance = false
+        fullscreen = false
+        configuring = false
+        showingMotion = true
+    }
+    function closeMotionGallery() {
+        showingMotion = false
+    }
+    function toggleFullscreen() {
+        if (!configured || configuring || showingMotion) return
+        fullscreen = !fullscreen
+        if (fullscreen) {
+            pinned = true
+            Qt.callLater(function() {
+                if (!root.fullscreen || !popup.screen) return
+                popup.pinnedOrigin = Qt.point(
+                    Math.round((popup.screenW - popup.contentWidth) / 2),
+                    Math.round((popup.screenH - popup.contentHeight) / 2))
+            })
+        }
+    }
+    function exitFullscreenIfActive(event) {
+        if (!fullscreen) return false
+        fullscreen = false
+        if (event) event.accepted = true
+        return true
+    }
     function editSettings(newCamera) {
         editingAppearance = false
+        showingMotion = false
+        fullscreen = false
         editingCameraId = newCamera === true ? "" : selectedCameraId
         cameraName.text = newCamera === true ? "" : selectedCameraIndex >= 0 ? cameras[selectedCameraIndex].name : "Camera 1"
         address.text = newCamera === true ? "rtsp://" : config.url
@@ -113,6 +146,7 @@ Panel {
     }
     function selectCamera(index) {
         if (writer.running || index < 0 || index >= cameras.length) return
+        showingMotion = false
         if (index === selectedCameraIndex) {
             if (configuring) editSettings()
             return
@@ -165,6 +199,7 @@ Panel {
             playing: player.playbackState === MediaPlayer.PlayingState,
             hasAudio: player.hasAudio, muted: cameraAudio.muted,
             width: popup.contentWidth, height: popup.contentHeight,
+            fullscreen: fullscreen,
             sizePending: sizeDirty || sizeWriter.running, sizeSaveError: sizeSaveError,
             pinned: pinned, inputWidth: popup.mask.width, inputHeight: popup.mask.height,
             x: popup.cardOrigin.x, y: popup.cardOrigin.y,
@@ -173,6 +208,7 @@ Panel {
             positionPending: !!pendingPosition || positionWriter.running,
             positionSaveError: positionSaveError,
             cameraCount: cameras.length, selectedCameraId: selectedCameraId,
+            showingMotion: showingMotion,
             message: playbackMessage})
     }
     function resizeViewer(width, height) {
@@ -211,6 +247,8 @@ Panel {
     onOpenedChanged: {
         if (!opened) {
             editingAppearance = false
+            showingMotion = false
+            fullscreen = false
             writer.stayInSettings = false
             pinned = false
             sizeSaveTimer.stop()
@@ -220,6 +258,8 @@ Panel {
         }
         if (opened) {
             configuring = !configured
+            showingMotion = false
+            fullscreen = false
             if (configuring) editSettings()
         }
     }
@@ -454,23 +494,57 @@ Panel {
         bar: root.bar
         open: root.opened
         pinned: root.pinned
+        // Dropdowns render outside the card; don't fade chrome while one is open.
+        chromeForce: cameraSelector.popup.opened || videoStyleChooser.popup.opened || overlayChooser.popup.opened
+        onChromeForceChanged: {
+            if (chromeForce) Qt.callLater(refreshExtraInput)
+            else extraInput = Qt.rect(0, 0, 0, 0)
+        }
+        onCardOriginChanged: if (chromeForce) Qt.callLater(refreshExtraInput)
         onPositionMoved: function(x, y) {
             if (!screen) return
             root.pendingPosition = {screen: screen.name, x: Math.round(x), y: Math.round(y)}
             positionSaveTimer.restart()
         }
-        contentWidth: fittedContentWidth(root.viewerWidth)
-        contentHeight: cappedContentHeight(root.viewerHeight)
+        // Pinned input mask is the card rect only — include open combo popups
+        // so list rows that hang past the card stay clickable.
+        function refreshExtraInput() {
+            var combos = [cameraSelector, videoStyleChooser, overlayChooser]
+            var extra = Qt.rect(0, 0, 0, 0)
+            for (var i = 0; i < combos.length; i++) {
+                var combo = combos[i]
+                if (!combo || !combo.popup || !combo.popup.opened) continue
+                var surface = combo.popup.contentItem || combo.popup
+                var origin = surface.mapToItem(null, 0, 0)
+                extra = Qt.rect(origin.x, origin.y, surface.width, surface.height)
+                break
+            }
+            extraInput = extra
+        }
+        contentWidth: root.fullscreen
+            ? popup.availableCardWidth
+            : fittedContentWidth(root.viewerWidth)
+        contentHeight: root.fullscreen
+            ? popup.availableCardHeight
+            : cappedContentHeight(root.viewerHeight)
         focusTarget: content
 
         FocusScope {
             id: content
             anchors.fill: parent
-            Keys.onEscapePressed: root.close()
+            Keys.onEscapePressed: function(event) {
+                if (root.exitFullscreenIfActive(event)) return
+                if (root.showingMotion) {
+                    root.closeMotionGallery()
+                    event.accepted = true
+                    return
+                }
+                root.close()
+            }
             ColumnLayout {
                 anchors.fill: parent
-                anchors.bottomMargin: 20
-                spacing: 12
+                anchors.bottomMargin: 16
+                spacing: 10
                 Item {
                     Layout.fillWidth: true
                     implicitHeight: headerControls.implicitHeight
@@ -494,8 +568,11 @@ Panel {
                             popup.movePinned(startOrigin.x + point.x - dragStart.x,
                                 startOrigin.y + point.y - dragStart.y)
                         }
-                        ToolTip.visible: containsMouse && !pressed
-                        ToolTip.text: "Drag to move camera"
+                        PanelToolTip {
+                            visible: parent.containsMouse && !parent.pressed
+                            text: "Drag to move camera"
+                            fontSize: Style.font.caption
+                        }
                     }
                     RowLayout {
                         id: headerControls
@@ -511,79 +588,217 @@ Panel {
                             textRole: "name"
                             currentIndex: root.selectedCameraIndex
                             displayText: root.cameras.length ? currentText : "No cameras"
-                            enabled: !writer.running && root.cameras.length > 0
+                            enabled: !writer.running && root.cameras.length > 0 && !root.showingMotion
                             Accessible.name: "Select camera"
                             onActivated: function(index) { root.selectCamera(index) }
                             contentItem: Text {
                                 text: cameraSelector.displayText
                                 color: Color.popups.text
+                                font.family: Style.font.family
+                                font.pixelSize: Style.font.caption
                                 verticalAlignment: Text.AlignVCenter
                                 elide: Text.ElideRight
                                 leftPadding: 10
                                 rightPadding: 28
                             }
                             background: Rectangle {
+                                radius: 10
                                 color: Color.popups.background
-                                border.color: cameraSelector.activeFocus ? Color.accent : Color.popups.border
+                                border.width: 1
+                                border.color: cameraSelector.activeFocus
+                                    ? Color.accent
+                                    : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
                             }
                             indicator: Text {
                                 x: cameraSelector.width - width - 10
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "\u2304"
                                 color: Color.popups.text
+                                font.family: Style.font.family
+                                font.pixelSize: Style.font.caption
                             }
                             delegate: Controls.ItemDelegate {
                                 required property var modelData
-                                width: cameraSelector.width
+                                width: cameraSelector.popup.availableWidth
+                                height: 36
                                 text: modelData.name
                                 contentItem: Text {
                                     text: parent.text
-                                    color: Color.popups.text
+                                    color: parent.highlighted ? Style.hoverStateColor(Color.popups.text, Color.accent) : Color.popups.text
+                                    font.family: Style.font.family
+                                    font.pixelSize: Style.font.body
                                     elide: Text.ElideRight
                                     verticalAlignment: Text.AlignVCenter
+                                    leftPadding: 10
+                                    rightPadding: 10
                                 }
                                 background: Rectangle {
-                                    color: parent.hovered ? Style.hoverFillFor(Color.popups.text, Color.accent) : Color.popups.background
+                                    radius: 8
+                                    color: parent.hovered || parent.highlighted
+                                        ? Style.hoverFillFor(Color.popups.text, Color.accent)
+                                        : "transparent"
                                 }
+                                PointerArea {}
                             }
                             popup: Controls.Popup {
-                                y: cameraSelector.height
-                                width: cameraSelector.width
-                                height: Math.min(180, cameraList.contentHeight + 2)
-                                padding: 1
+                                y: cameraSelector.height + 6
+                                width: cameraSelector.width + 12
+                                height: Math.min(220, cameraList.contentHeight + 12)
+                                padding: 6
+                                focus: true
                                 contentItem: ListView {
                                     id: cameraList
                                     clip: true
+                                    spacing: 2
+                                    boundsBehavior: Flickable.StopAtBounds
                                     model: cameraSelector.popup.visible ? cameraSelector.delegateModel : null
                                     currentIndex: cameraSelector.highlightedIndex
                                     Controls.ScrollIndicator.vertical: Controls.ScrollIndicator {}
                                 }
-                                background: Rectangle { color: Color.popups.background; border.color: Color.popups.border }
+                                background: Rectangle {
+                                    radius: 12
+                                    color: Color.popups.background
+                                    border.width: 1
+                                    border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.65)
+                                }
                             }
+                            PointerArea {}
                         }
                         Item {
                             objectName: "headerDragSpace"
                             Layout.fillWidth: true
-                            Layout.minimumWidth: 32
+                            Layout.minimumWidth: 16
                             Layout.fillHeight: true
+                        }
+                        Controls.Button {
+                            objectName: "motionButton"
+                            text: root.showingMotion ? "Live" : "Motion"
+                            leftPadding: 12
+                            rightPadding: 12
+                            topPadding: 7
+                            bottomPadding: 7
+                            hoverEnabled: true
+                            Accessible.name: root.showingMotion ? "Back to live camera" : "Motion captures"
+                            PanelToolTip {
+                                visible: parent.hovered
+                                text: root.showingMotion
+                                    ? "Return to live view"
+                                    : "Motion stills from the last 24 hours"
+                                fontSize: Style.font.caption
+                            }
+                            enabled: !writer.running && root.configured
+                            background: Rectangle {
+                                radius: height / 2
+                                color: parent.hovered
+                                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
+                                    : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                                border.width: 1
+                                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                            }
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.hovered ? Color.accent : Color.popups.text
+                                font.pixelSize: Style.font.caption
+                                font.weight: Font.DemiBold
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            onClicked: {
+                                if (root.showingMotion) root.closeMotionGallery()
+                                else root.openMotionGallery()
+                            }
+                            PointerArea {}
+                        }
+                        Controls.Button {
+                            objectName: "themeButton"
+                            text: "Themes"
+                            leftPadding: 12
+                            rightPadding: 12
+                            topPadding: 7
+                            bottomPadding: 7
+                            hoverEnabled: true
+                            visible: !root.configuring && !root.showingMotion
+                            Accessible.name: "Video themes"
+                            PanelToolTip {
+                                visible: parent.hovered
+                                text: "Video style picker"
+                                fontSize: Style.font.caption
+                            }
+                            background: Rectangle {
+                                radius: height / 2
+                                color: parent.hovered
+                                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
+                                    : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                                border.width: 1
+                                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                            }
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.hovered ? Color.accent : Color.popups.text
+                                font.pixelSize: Style.font.caption
+                                font.weight: Font.DemiBold
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            onClicked: root.toggleAppearance()
+                            PointerArea {}
+                        }
+                        Controls.Button {
+                            objectName: "configButton"
+                            text: "Config"
+                            leftPadding: 12
+                            rightPadding: 12
+                            topPadding: 7
+                            bottomPadding: 7
+                            hoverEnabled: true
+                            Accessible.name: "Camera settings"
+                            PanelToolTip {
+                                visible: parent.hovered
+                                text: "Connection settings"
+                                fontSize: Style.font.caption
+                            }
+                            enabled: !writer.running
+                            background: Rectangle {
+                                radius: height / 2
+                                color: parent.hovered
+                                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
+                                    : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                                border.width: 1
+                                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                            }
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.hovered ? Color.accent : Color.popups.text
+                                font.pixelSize: Style.font.caption
+                                font.weight: Font.DemiBold
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            onClicked: root.editSettings()
+                            PointerArea {}
                         }
                         Controls.Switch {
                             id: pinSwitch
+                            objectName: "pinSwitch"
+                            visible: !root.showingMotion
                             implicitWidth: 44
                             implicitHeight: 28
                             padding: 0
                             checked: root.pinned
                             hoverEnabled: true
                             Accessible.name: root.pinned ? "Unpin camera" : "Keep camera above other windows"
-                            ToolTip.visible: hovered
-                            ToolTip.text: root.pinned ? "Return to popup mode" : "Stay visible while using other windows"
+                            PanelToolTip {
+                                visible: pinSwitch.hovered
+                                text: pinSwitch.checked ? "Return to popup mode" : "Stay visible while using other windows"
+                                fontSize: Style.font.caption
+                            }
                             onClicked: root.pinned = checked
                             indicator: Rectangle {
                                 x: 0
                                 y: (pinSwitch.height - height) / 2
                                 width: 44
                                 height: 24
-                                radius: 0
+                                radius: height / 2
                                 color: pinSwitch.hovered
                                     ? Style.hoverFillFor(Color.popups.text, Color.accent)
                                     : pinSwitch.checked
@@ -596,7 +811,7 @@ Panel {
                                     y: 3
                                     width: 18
                                     height: 18
-                                    radius: 0
+                                    radius: height / 2
                                     color: pinSwitch.checked
                                         ? Style.selectedStateColor(Color.popups.text, Color.accent)
                                         : Qt.darker(Color.popups.text, 1.25)
@@ -606,18 +821,32 @@ Panel {
                                 }
                             }
                             contentItem: Item {}
-                        }
-                        Button {
-                            text: "Config"
-                            Accessible.name: "Camera settings"
-                            ToolTip.visible: hovered
-                            ToolTip.text: "Connection settings"
-                            enabled: !writer.running
-                            onClicked: root.editSettings()
+                            PointerArea {}
                         }
                         ToolButton {
-                            text: "\u00d7"
+                            text: "×"
+                            hoverEnabled: true
+                            implicitWidth: 32
+                            implicitHeight: 32
+                            padding: 0
                             Accessible.name: "Close camera"
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.hovered ? Color.accent : Color.popups.text
+                                font.family: Style.font.family
+                                font.pixelSize: Style.font.body
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: height / 2
+                                color: parent.hovered
+                                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
+                                    : "transparent"
+                                border.width: parent.hovered ? 1 : 0
+                                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                            }
+                            PointerArea {}
                             onClicked: root.close()
                         }
                     }
@@ -625,7 +854,7 @@ Panel {
                 StackLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    currentIndex: root.configuring ? 1 : 0
+                    currentIndex: root.configuring ? 1 : root.showingMotion ? 2 : 0
                     ColumnLayout {
                         id: viewerPage
                         spacing: 8
@@ -696,6 +925,8 @@ Panel {
                                 text: root.playbackMessage
                                 visible: text !== ""
                                 color: "white"
+                                font.family: Style.font.family
+                                font.pixelSize: Style.font.caption
                                 wrapMode: Text.WordWrap
                                 horizontalAlignment: Text.AlignHCenter
                                 padding: 12
@@ -712,7 +943,8 @@ Panel {
                                 visible: text !== ""
                                 color: "#ffd2d2"
                                 wrapMode: Text.WordWrap
-                                font.pixelSize: 12
+                                font.family: Style.font.family
+                                font.pixelSize: Style.font.caption
                             }
                             RowLayout {
                                 id: feedControls
@@ -728,14 +960,14 @@ Panel {
                                 spacing: 6
                                 Item { Layout.fillWidth: true }
                                 FeedButton {
-                                    objectName: "themeButton"
-                                    text: "\udb80\udfd8"
+                                    objectName: "fullscreenButton"
+                                    text: "⛶"
                                     font.family: "JetBrainsMono Nerd Font"
-                                    Accessible.name: "Video theme"
-                                    ToolTip.text: root.editingAppearance ? "Close theme preview" : "Video theme"
-                                    checked: root.editingAppearance
-                                    enabled: !appearanceWriter.running
-                                    onClicked: root.toggleAppearance()
+                                    Accessible.name: root.fullscreen ? "Exit fullscreen" : "Fullscreen"
+                                    tipText: root.fullscreen ? "Exit fullscreen" : "Fullscreen"
+                                    checked: root.fullscreen
+                                    onClicked: root.toggleFullscreen()
+                                    PointerArea {}
                                 }
                             }
                         }
@@ -745,8 +977,10 @@ Panel {
                             visible: root.editingAppearance
                             Layout.fillWidth: true
                             Layout.preferredHeight: Math.min(appearanceColumn.implicitHeight + appearanceFooter.implicitHeight + 36, viewerPage.height * 0.6)
+                            radius: 12
                             color: Color.popups.background
-                            border.color: Color.popups.border
+                            border.width: 1
+                            border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.65)
                             ColumnLayout {
                                 anchors.fill: parent
                                 anchors.margins: 12
@@ -762,7 +996,13 @@ Panel {
                                         id: appearanceColumn
                                         width: appearanceScroll.availableWidth
                                         spacing: 12
-                                        Label { text: "Video style · all cameras"; color: root.foreground }
+                                        Label {
+                                            text: "Video style · all cameras"
+                                            color: root.foreground
+                                            font.family: Style.font.family
+                                            font.pixelSize: Style.font.caption
+                                            font.weight: Font.Medium
+                                        }
                                         Controls.ComboBox {
                                             id: videoStyleChooser
                                             objectName: "videoStyle"
@@ -775,49 +1015,87 @@ Panel {
                                             contentItem: Text {
                                                 text: videoStyleChooser.displayText
                                                 color: Color.popups.text
+                                                font.family: Style.font.family
+                                                font.pixelSize: Style.font.caption
                                                 verticalAlignment: Text.AlignVCenter
                                                 leftPadding: 10; rightPadding: 28
                                             }
                                             background: Rectangle {
+                                                radius: 10
                                                 color: Color.popups.background
-                                                border.color: videoStyleChooser.activeFocus ? Color.accent : Color.popups.border
+                                                border.width: 1
+                                                border.color: videoStyleChooser.activeFocus
+                                                    ? Color.accent
+                                                    : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
                                             }
                                             indicator: Text {
                                                 x: videoStyleChooser.width - width - 10
                                                 anchors.verticalCenter: parent.verticalCenter
-                                                text: "\u2304"; color: Color.popups.text
+                                                text: "\u2304"
+                                                color: Color.popups.text
+                                                font.family: Style.font.family
+                                                font.pixelSize: Style.font.caption
                                             }
                                             delegate: Controls.ItemDelegate {
                                                 required property string modelData
                                                 required property int index
-                                                width: videoStyleChooser.width
+                                                width: videoStyleChooser.popup.availableWidth
+                                                height: 36
                                                 text: modelData
                                                 highlighted: videoStyleChooser.highlightedIndex === index
-                                                contentItem: Text { text: parent.text; color: Color.popups.text; verticalAlignment: Text.AlignVCenter }
-                                                background: Rectangle {
-                                                    color: parent.hovered || parent.highlighted
-                                                        ? Style.hoverFillFor(Color.popups.text, Color.accent) : Color.popups.background
+                                                contentItem: Text {
+                                                    text: parent.text
+                                                    color: parent.highlighted
+                                                        ? Style.hoverStateColor(Color.popups.text, Color.accent)
+                                                        : Color.popups.text
+                                                    font.family: Style.font.family
+                                                    font.pixelSize: Style.font.body
+                                                    verticalAlignment: Text.AlignVCenter
+                                                    leftPadding: 10
+                                                    rightPadding: 10
                                                 }
+                                                background: Rectangle {
+                                                    radius: 8
+                                                    color: parent.hovered || parent.highlighted
+                                                        ? Style.hoverFillFor(Color.popups.text, Color.accent)
+                                                        : "transparent"
+                                                }
+                                                PointerArea {}
                                             }
                                             popup: Controls.Popup {
-                                                y: videoStyleChooser.height
-                                                width: videoStyleChooser.width
-                                                implicitHeight: styleList.contentHeight + 2
-                                                padding: 1
+                                                y: videoStyleChooser.height + 6
+                                                width: videoStyleChooser.width + 12
+                                                implicitHeight: styleList.contentHeight + 12
+                                                padding: 6
+                                                focus: true
                                                 contentItem: ListView {
                                                     id: styleList
                                                     clip: true
+                                                    spacing: 2
+                                                    boundsBehavior: Flickable.StopAtBounds
                                                     implicitHeight: contentHeight
                                                     model: videoStyleChooser.popup.visible ? videoStyleChooser.delegateModel : null
                                                     currentIndex: videoStyleChooser.highlightedIndex
                                                 }
-                                                background: Rectangle { color: Color.popups.background; border.color: Color.popups.border }
+                                                background: Rectangle {
+                                                    radius: 12
+                                                    color: Color.popups.background
+                                                    border.width: 1
+                                                    border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.65)
+                                                }
                                             }
+                                            PointerArea {}
                                         }
                                         RowLayout {
                                             visible: videoStyleChooser.currentIndex === 1 || videoStyleChooser.currentIndex === 3
                                             Layout.fillWidth: true
-                                            Label { text: "Tint strength"; color: root.foreground }
+                                            Label {
+                                                text: "Tint strength"
+                                                color: root.foreground
+                                                font.family: Style.font.family
+                                                font.pixelSize: Style.font.caption
+                                                font.weight: Font.Medium
+                                            }
                                             Controls.Slider {
                                                 id: tintSlider
                                                 objectName: "tintStrength"
@@ -841,13 +1119,25 @@ Panel {
                                                     border.width: tintSlider.activeFocus ? 2 : 1
                                                     border.color: Color.popups.text
                                                 }
+                                                PointerArea {}
                                             }
-                                            Label { text: Math.round(tintSlider.value) + "%"; color: root.foreground }
+                                            Label {
+                                                text: Math.round(tintSlider.value) + "%"
+                                                color: root.foreground
+                                                font.family: Style.font.family
+                                                font.pixelSize: Style.font.caption
+                                            }
                                         }
                                         RowLayout {
                                             visible: videoStyleChooser.currentIndex === 2 || videoStyleChooser.currentIndex === 3
                                             Layout.fillWidth: true
-                                            Label { text: "Pixel size"; color: root.foreground }
+                                            Label {
+                                                text: "Pixel size"
+                                                color: root.foreground
+                                                font.family: Style.font.family
+                                                font.pixelSize: Style.font.caption
+                                                font.weight: Font.Medium
+                                            }
                                             Controls.Slider {
                                                 id: pixelSlider
                                                 objectName: "pixelSize"
@@ -856,8 +1146,11 @@ Panel {
                                                 value: root.pixelSize
                                                 enabled: !appearanceWriter.running
                                                 Accessible.name: "Pixel size"
-                                                ToolTip.visible: hovered
-                                                ToolTip.text: "Larger pixels give a stronger pixelated look"
+                                                PanelToolTip {
+                                                    visible: parent.hovered
+                                                    text: "Stronger pixel blocks"
+                                                    fontSize: Style.font.caption
+                                                }
                                                 background: Rectangle {
                                                     x: pixelSlider.leftPadding
                                                     y: pixelSlider.topPadding + pixelSlider.availableHeight / 2 - height / 2
@@ -873,12 +1166,24 @@ Panel {
                                                     border.width: pixelSlider.activeFocus ? 2 : 1
                                                     border.color: Color.popups.text
                                                 }
+                                                PointerArea {}
                                             }
-                                            Label { text: Math.round(pixelSlider.value) + " px"; color: root.foreground }
+                                            Label {
+                                                text: Math.round(pixelSlider.value) + " px"
+                                                color: root.foreground
+                                                font.family: Style.font.family
+                                                font.pixelSize: Style.font.caption
+                                            }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Label { text: "Overlay"; color: root.foreground }
+                                            Label {
+                                            text: "Overlay"
+                                            color: root.foreground
+                                            font.family: Style.font.family
+                                            font.pixelSize: Style.font.caption
+                                            font.weight: Font.Medium
+                                        }
                                             Controls.ComboBox {
                                                 id: overlayChooser
                                                 objectName: "overlayStyle"
@@ -891,44 +1196,76 @@ Panel {
                                                 contentItem: Text {
                                                     text: overlayChooser.displayText
                                                     color: Color.popups.text
+                                                    font.family: Style.font.family
+                                                    font.pixelSize: Style.font.caption
                                                     verticalAlignment: Text.AlignVCenter
                                                     leftPadding: 10; rightPadding: 28
                                                 }
                                                 background: Rectangle {
+                                                    radius: 10
                                                     color: Color.popups.background
-                                                    border.color: overlayChooser.activeFocus ? Color.accent : Color.popups.border
+                                                    border.width: 1
+                                                    border.color: overlayChooser.activeFocus
+                                                        ? Color.accent
+                                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
                                                 }
                                                 indicator: Text {
                                                     x: overlayChooser.width - width - 10
                                                     anchors.verticalCenter: parent.verticalCenter
-                                                    text: "\u2304"; color: Color.popups.text
+                                                    text: "\u2304"
+                                                    color: Color.popups.text
+                                                    font.family: Style.font.family
+                                                    font.pixelSize: Style.font.caption
                                                 }
                                                 delegate: Controls.ItemDelegate {
                                                     required property string modelData
                                                     required property int index
-                                                    width: overlayChooser.width
+                                                    width: overlayChooser.popup.availableWidth
+                                                    height: 36
                                                     text: modelData
                                                     highlighted: overlayChooser.highlightedIndex === index
-                                                    contentItem: Text { text: parent.text; color: Color.popups.text; verticalAlignment: Text.AlignVCenter }
-                                                    background: Rectangle {
-                                                        color: parent.hovered || parent.highlighted
-                                                            ? Style.hoverFillFor(Color.popups.text, Color.accent) : Color.popups.background
+                                                    contentItem: Text {
+                                                        text: parent.text
+                                                        color: parent.highlighted
+                                                            ? Style.hoverStateColor(Color.popups.text, Color.accent)
+                                                            : Color.popups.text
+                                                        font.family: Style.font.family
+                                                        font.pixelSize: Style.font.body
+                                                        verticalAlignment: Text.AlignVCenter
+                                                        leftPadding: 10
+                                                        rightPadding: 10
                                                     }
+                                                    background: Rectangle {
+                                                        radius: 8
+                                                        color: parent.hovered || parent.highlighted
+                                                            ? Style.hoverFillFor(Color.popups.text, Color.accent)
+                                                            : "transparent"
+                                                    }
+                                                    PointerArea {}
                                                 }
                                                 popup: Controls.Popup {
-                                                    y: overlayChooser.height
-                                                    width: overlayChooser.width
-                                                    implicitHeight: overlayList.contentHeight + 2
-                                                    padding: 1
+                                                    y: overlayChooser.height + 6
+                                                    width: overlayChooser.width + 12
+                                                    implicitHeight: overlayList.contentHeight + 12
+                                                    padding: 6
+                                                    focus: true
                                                     contentItem: ListView {
                                                         id: overlayList
                                                         clip: true
+                                                        spacing: 2
+                                                        boundsBehavior: Flickable.StopAtBounds
                                                         implicitHeight: contentHeight
                                                         model: overlayChooser.popup.visible ? overlayChooser.delegateModel : null
                                                         currentIndex: overlayChooser.highlightedIndex
                                                     }
-                                                    background: Rectangle { color: Color.popups.background; border.color: Color.popups.border }
+                                                    background: Rectangle {
+                                                        radius: 12
+                                                        color: Color.popups.background
+                                                        border.width: 1
+                                                        border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.65)
+                                                    }
                                                 }
+                                                PointerArea {}
                                             }
                                         }
 
@@ -940,22 +1277,45 @@ Panel {
                                     Label {
                                         text: root.appearanceMessage || "Previewing live · Apply to save for all cameras."
                                         color: root.foreground
-                                        font.pixelSize: 12
+                                        font.family: Style.font.family
+                                        font.pixelSize: Style.font.caption
                                         wrapMode: Text.WordWrap
                                         Layout.fillWidth: true
                                     }
-                                    Button {
-                                        objectName: "applyStyle"
-                                        text: appearanceWriter.running ? "Applying…" : "Apply"
-                                        enabled: !appearanceWriter.running
-                                        onClicked: {
-                                            root.appearanceMessage = ""
-                                            appearanceWriter.pending = JSON.stringify({style: root.videoStyles[videoStyleChooser.currentIndex],
-                                                strength: Math.round(tintSlider.value), pixelSize: Math.round(pixelSlider.value),
-                                                overlay: root.overlayStyles[overlayChooser.currentIndex]})
-                                            appearanceWriter.running = true
-                                        }
+                                Controls.Button {
+                                    objectName: "applyStyle"
+                                    text: appearanceWriter.running ? "Applying…" : "Apply"
+                                    hoverEnabled: true
+                                    leftPadding: 16
+                                    rightPadding: 16
+                                    topPadding: 7
+                                    bottomPadding: 7
+                                    enabled: !appearanceWriter.running
+                                    background: Rectangle {
+                                        radius: height / 2
+                                        color: parent.hovered
+                                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.35)
+                                            : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                                        border.width: 1
+                                        border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.55)
                                     }
+                                    contentItem: Text {
+                                        text: parent.text
+                                        color: Color.accent
+                                        font.pixelSize: Style.font.caption
+                                        font.weight: Font.DemiBold
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    onClicked: {
+                                        root.appearanceMessage = ""
+                                        appearanceWriter.pending = JSON.stringify({style: root.videoStyles[videoStyleChooser.currentIndex],
+                                            strength: Math.round(tintSlider.value), pixelSize: Math.round(pixelSlider.value),
+                                            overlay: root.overlayStyles[overlayChooser.currentIndex]})
+                                        appearanceWriter.running = true
+                                    }
+                                    PointerArea {}
+                                }
                                 }
                             }
                         }
@@ -972,16 +1332,40 @@ Panel {
                             spacing: 8
                             RowLayout {
                                 Layout.fillWidth: true
-                                Label { text: "Camera name"; color: root.foreground; Layout.fillWidth: true }
-                                Controls.ToolButton {
+                                Label { text: "Camera name"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.weight: Font.Medium; Layout.fillWidth: true }
+                                Controls.Button {
                                     objectName: "addCameraButton"
                                     text: "+"
+                                    leftPadding: 12
+                                    rightPadding: 12
+                                    topPadding: 4
+                                    bottomPadding: 4
+                                    hoverEnabled: true
+                                    background: Rectangle {
+                                        radius: height / 2
+                                        color: parent.hovered
+                                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28)
+                                            : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.08)
+                                        border.width: 1
+                                        border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                    }
+                                    contentItem: Text {
+                                        text: parent.text
+                                        color: parent.hovered ? Color.accent : Color.popups.text
+                                        font.pixelSize: 18
+                                        font.weight: Font.DemiBold
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
                                     enabled: !writer.running && root.cameras.length < 32
                                     Accessible.name: "Add camera"
-                                    ToolTip.visible: hovered
-                                    ToolTip.text: "Add camera"
+                                    PanelToolTip {
+                                        visible: parent.hovered
+                                        text: "Add camera"
+                                        fontSize: Style.font.caption
+                                    }
                                     onClicked: root.editSettings(true)
-                                    contentItem: Text { text: parent.text; color: Color.popups.text; font.pixelSize: 22; horizontalAlignment: Text.AlignHCenter }
+                                    PointerArea {}
                                 }
                             }
                             TextField {
@@ -992,8 +1376,16 @@ Panel {
                                 maximumLength: 64
                                 selectByMouse: true
                                 Accessible.name: "Camera name"
+                                background: Rectangle {
+                                    radius: 10
+                                    color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.05)
+                                    border.width: 1
+                                    border.color: cameraName.activeFocus
+                                        ? Color.accent
+                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                }
                             }
-                            Label { text: "RTSP address"; color: root.foreground }
+                            Label { text: "RTSP address"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.weight: Font.Medium }
                             TextField {
                                 id: address
                                 objectName: "cameraAddress"
@@ -1002,16 +1394,32 @@ Panel {
                                 placeholderText: "rtsp://camera-ip:554/stream"
                                 selectByMouse: true
                                 Accessible.name: "RTSP address"
+                                background: Rectangle {
+                                    radius: 10
+                                    color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.05)
+                                    border.width: 1
+                                    border.color: address.activeFocus
+                                        ? Color.accent
+                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                }
                             }
-                            Label { text: "Username"; color: root.foreground }
+                            Label { text: "Username"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.weight: Font.Medium }
                             TextField {
                                 id: username
                                 objectName: "cameraUsername"
                                 Layout.fillWidth: true
                                 selectByMouse: true
                                 Accessible.name: "Username"
+                                background: Rectangle {
+                                    radius: 10
+                                    color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.05)
+                                    border.width: 1
+                                    border.color: username.activeFocus
+                                        ? Color.accent
+                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                }
                             }
-                            Label { text: "Password"; color: root.foreground }
+                            Label { text: "Password"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.weight: Font.Medium }
                             TextField {
                                 id: password
                                 objectName: "cameraPassword"
@@ -1019,47 +1427,136 @@ Panel {
                                 echoMode: TextInput.Password
                                 selectByMouse: true
                                 Accessible.name: "Password"
+                                background: Rectangle {
+                                    radius: 10
+                                    color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.05)
+                                    border.width: 1
+                                    border.color: password.activeFocus
+                                        ? Color.accent
+                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                }
                             }
                             Label {
                                 text: root.message || "Saved locally in a file readable only by your user account."
                                 color: root.message ? "#f38ba8" : root.foreground
                                 Layout.fillWidth: true
                                 wrapMode: Text.WordWrap
-                                font.pixelSize: 12
+                                font.family: Style.font.family
+                                font.pixelSize: Style.font.caption
                             }
                             RowLayout {
                                 Layout.fillWidth: true
-                                Button {
+                                Controls.Button {
                                     text: root.deleteArmed ? "Confirm delete" : "Delete"
+                                    hoverEnabled: true
+                                    leftPadding: 14
+                                    rightPadding: 14
+                                    topPadding: 7
+                                    bottomPadding: 7
                                     visible: root.editingCameraId !== ""
+                                    background: Rectangle {
+                                        radius: height / 2
+                                        color: parent.hovered
+                                            ? Qt.rgba(0.9, 0.3, 0.35, 0.35)
+                                            : Qt.rgba(0.9, 0.3, 0.35, 0.15)
+                                        border.width: 1
+                                        border.color: Qt.rgba(0.9, 0.3, 0.35, 0.55)
+                                    }
+                                    contentItem: Text {
+                                        text: parent.text
+                                        color: parent.hovered ? "#ffb4b8" : "#f38ba8"
+                                        font.pixelSize: Style.font.caption
+                                        font.weight: Font.Medium
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
                                     onClicked: {
                                         if (root.deleteArmed) root.runProfileOperation({action: "delete", id: root.editingCameraId})
                                         else root.deleteArmed = true
                                     }
+                                    PointerArea {}
                                 }
                                 Item { Layout.fillWidth: true }
-                                Button {
+                                Controls.Button {
                                     text: "Cancel"
+                                    hoverEnabled: true
+                                    leftPadding: 14
+                                    rightPadding: 14
+                                    topPadding: 7
+                                    bottomPadding: 7
                                     visible: root.configured
+                                    background: Rectangle {
+                                        radius: height / 2
+                                        color: parent.hovered
+                                            ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
+                                            : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                                        border.width: 1
+                                        border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                    }
+                                    contentItem: Text {
+                                        text: parent.text
+                                        color: parent.hovered ? Color.accent : Color.popups.text
+                                        font.pixelSize: Style.font.caption
+                                        font.weight: Font.Medium
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
                                     onClicked: { password.text = ""; root.configuring = false }
+                                    PointerArea {}
                                 }
-                                Button {
+                                Controls.Button {
+                                    objectName: "saveProfile"
                                     text: writer.running ? "Saving…" : "Save & connect"
+                                    hoverEnabled: true
+                                    leftPadding: 16
+                                    rightPadding: 16
+                                    topPadding: 7
+                                    bottomPadding: 7
+                                    background: Rectangle {
+                                        radius: height / 2
+                                        color: parent.hovered
+                                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.4)
+                                            : Color.accent
+                                        border.width: 0
+                                    }
+                                    contentItem: Text {
+                                        text: parent.text
+                                        color: parent.hovered ? "#ffffff" : Qt.darker(Color.accent, 1.8)
+                                        font.pixelSize: Style.font.caption
+                                        font.weight: Font.DemiBold
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
                                     onClicked: root.submitProfile()
+                                    PointerArea {}
                                 }
                             }
                         }
+                    }
+                    MotionGallery {
+                        id: motionGallery
+                        objectName: "motionGallery"
+                        visible: root.showingMotion && !root.configuring
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        focus: root.showingMotion
+                        onClosed: root.closeMotionGallery()
                     }
                 }
             }
             component FeedButton: Controls.Button {
                 id: feedButton
-                implicitWidth: 34
-                implicitHeight: 34
+                property string tipText: ""
+                implicitWidth: 36
+                implicitHeight: 36
                 padding: 0
-                font.pixelSize: 20
+                font.pixelSize: 18
                 hoverEnabled: true
-                ToolTip.visible: hovered
+                PanelToolTip {
+                    visible: feedButton.hovered && feedButton.tipText !== ""
+                    text: feedButton.tipText
+                    fontSize: Style.font.caption
+                }
                 contentItem: Text {
                     text: parent.text
                     font: parent.font
@@ -1069,12 +1566,15 @@ Panel {
                     verticalAlignment: Text.AlignVCenter
                 }
                 background: Rectangle {
-                    radius: 0
-                    color: "transparent"
-                    border.width: feedButton.activeFocus ? 2 : 1
+                    radius: 18
+                    color: feedButton.hovered || feedButton.checked
+                        ? Qt.rgba(0, 0, 0, 0.35)
+                        : Qt.rgba(0, 0, 0, 0.22)
+                    border.width: 1
                     border.color: !feedButton.enabled ? Color.muted
-                        : feedButton.checked || feedButton.hovered || feedButton.activeFocus ? Color.accent : Color.popups.border
+                        : feedButton.checked || feedButton.hovered || feedButton.activeFocus ? Color.accent : Qt.rgba(1, 1, 1, 0.12)
                 }
+                PointerArea {}
             }
             // Use scene coordinates: the popup can shift as its size changes.
             // Local mouse coordinates alone would feed that shift into the drag.
@@ -1101,9 +1601,12 @@ Panel {
                     root.resizeViewer(startWidth + (leftCorner ? -1 : 1) * (point.x - dragStart.x),
                         startHeight + (point.y - dragStart.y))
                 }
-                onDoubleClicked: root.resizeViewer(640, 500)
-                ToolTip.visible: containsMouse && !pressed
-                ToolTip.text: "Drag to resize · double-click to reset"
+                onDoubleClicked: function() { root.resizeViewer(640, 500) }
+                PanelToolTip {
+                    visible: parent.containsMouse && !parent.pressed
+                    text: "Drag to resize"
+                    fontSize: Style.font.caption
+                }
             }
             ResizeGrip { anchors.left: parent.left; leftCorner: true }
             ResizeGrip { anchors.right: parent.right }

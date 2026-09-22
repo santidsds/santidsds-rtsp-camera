@@ -220,7 +220,9 @@ ShellRoot {
             function click(item) { panel.pinned = true; wait(80); mouseClick(item); wait(80) }
             function field(name) { return find(content, function(i) { return i.objectName === name }) }
             var themeButton = field("themeButton")
-            assertOk(themeButton !== null, "feed offers a theme button")
+            assertOk(themeButton !== null, "header offers a themes button")
+            var feedFs = field("fullscreenButton")
+            assertOk(feedFs !== null, "feed offers a fullscreen button")
             var editor = field("themeEditor")
             var chooser = field("videoStyle"), strength = field("tintStrength"), pixelSize = field("pixelSize")
             var apply = field("applyStyle"), effect = field("videoEffect")
@@ -305,8 +307,8 @@ ShellRoot {
             assertOk(Math.abs(consoleLine.parent.parent.color.a - 0.39) < 0.01, "lower console background has half its previous opacity")
             var consoleBox = consoleLine.parent.parent
             assertOk(Math.abs(consoleBox.mapToItem(content, 0, consoleBox.height).y
-                - themeButton.mapToItem(content, 0, themeButton.height).y) < 1,
-                "console and theme button align at the bottom")
+                - feedFs.mapToItem(content, 0, feedFs.height).y) < 1,
+                "console and fullscreen button align at the bottom")
             capture(content, "theme-applied")
             var savedWidth = panel.viewerWidth, savedHeight = panel.viewerHeight
             for (var size of [[860, 440], [420, 650], [420, 440]]) {
@@ -318,7 +320,7 @@ ShellRoot {
                     && audioPosition.y >= overlay.item.inset + 4
                     && audioPosition.y + waveButton.height <= overlay.height,
                     "waveform stays inside video clear of top-right corner after resize")
-                for (var control of themeButton.parent.children) {
+                for (var control of feedFs.parent.children) {
                     if (control.text === undefined || !control.visible) continue
                     var position = control.mapToItem(overlay, 0, 0)
                     assertOk(position.x >= overlay.item.inset + 4
@@ -341,7 +343,7 @@ ShellRoot {
                 equal(field("terminalScanBand").visible, profile === "hacker", "only Hacker shows the sweep")
                 if (lowerConsole.visible) {
                     assertOk(lowerConsole.mapToItem(content, lowerConsole.width, 0).x + 8
-                        <= themeButton.mapToItem(content, 0, 0).x, "terminal clears the theme button")
+                        <= feedFs.mapToItem(content, 0, 0).x, "terminal clears the fullscreen button")
                 }
                 capture(content, "profile-" + profile)
             }
@@ -644,7 +646,7 @@ ShellRoot {
             var title = find(popup.contentItem[0], function(i) { return i.objectName === "headerDragSpace" })
             console.log("TITLE", title)
             console.log("GEOMETRY", title.width, title.height, popup.cardOrigin)
-            var pin = find(popup.contentItem[0], function(i) { return i.checkable === true })
+            var pin = find(popup.contentItem[0], function(i) { return i.objectName === "pinSwitch" || i.checkable === true })
             assertOk(pin !== null && pin.checked, "pin toggle reflects pinned mode")
             mouseClick(pin)
             assertOk(!panel.pinned && !pin.checked, "pin toggle unpins")
@@ -674,18 +676,19 @@ ShellRoot {
             wait(250)
             var status = find(popup.contentItem[0], function(i) { return i.text === "OFFLINE" || i.text === "LIVE" })
             var theme = find(popup.contentItem[0], function(i) { return i.objectName === "themeButton" })
+            var feedFs = find(popup.contentItem[0], function(i) { return i.objectName === "fullscreenButton" })
             assertOk(status === null, "no status chip while offline")
-            assertOk(theme !== null && theme.visible, "theme button visible")
+            assertOk(theme !== null && theme.visible, "themes button visible")
             console.log("PASS: theme control visible without status chip")
-            mouseMove(theme, 10, 10)
+            mouseMove(feedFs, 10, 10)
             wait(250)
             equal(popup.chromeOpacity, 1, "hover restores surrounding UI")
             mouseMove(popup.contentItem[0], -80, -80)
             wait(250)
             equal(popup.chromeOpacity, 0, "leaving pinned viewer hides surrounding UI")
             equal(title.parent.parent.opacity, 0, "header fades out")
-            equal(theme.parent.opacity, 1, "feed controls remain opaque")
-            equal(theme.parent.parent.opacity, 1, "feed remains opaque")
+            equal(feedFs.parent.opacity, 1, "feed controls remain opaque")
+            equal(feedFs.parent.parent.opacity, 1, "feed remains opaque")
             panel.pinned = false
             wait(250)
             equal(popup.chromeOpacity, 1, "unpinned UI stays visible without hover")

@@ -1,0 +1,16 @@
+[Unit]
+Description=yani.camera motion still capture (ONVIF)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %h is the user's home directory (no credentials on the command line).
+ExecStart=/usr/bin/python3 %h/.config/omarchy/plugins/yani.camera/motiond.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

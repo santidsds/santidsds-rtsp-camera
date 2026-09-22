@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "yani.camera",
   "name": "RTSP Camera",
-  "version": "1.6.4",
-  "author": "Yani",
+  "version": "1.7.0",
+  "author": "Yani (Yani3rt) — original; adapted by Santiago Da Silva",
   "license": "MIT",
-  "description": "View RTSP cameras from the bar with Omarchy colors, pixel effects, animated overlays, and audio controls.",
+  "description": "View RTSP cameras from the bar with Omarchy colors, pixel effects, overlays, audio controls, motion stills (24h), themes, and fullscreen live view.",
   "kinds": ["bar-widget"],
   "entryPoints": {"barWidget": "Widget.qml"},
   "barWidget": {

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import qs.Commons
+import qs.Ui
 
 Controls.Button {
     id: root
@@ -14,9 +15,12 @@ Controls.Button {
     hoverEnabled: true
     Accessible.name: !audioAvailable ? "No audio track"
         : audioMuted ? "Unmute camera audio" : "Mute camera audio"
-    Controls.ToolTip.visible: hovered
-    Controls.ToolTip.text: !audioAvailable ? "This stream has no audio track"
-        : audioMuted ? "Unmute camera audio" : "Mute camera audio"
+    PanelToolTip {
+        visible: root.hovered
+        text: !root.audioAvailable ? "No audio"
+            : root.audioMuted ? "Unmute" : "Mute"
+        fontSize: Style.font.caption
+    }
 
     // The waveform is simulated. Its clock is independent of video-frame status.
     Timer {
@@ -54,4 +58,5 @@ Controls.Button {
             opacity: root.audioAvailable ? 1 : 0.35
         }
     }
+    PointerArea {}
 }

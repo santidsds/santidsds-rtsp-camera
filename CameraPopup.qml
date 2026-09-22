@@ -48,7 +48,8 @@ PanelWindow {
   property int padding: Style.spacing.popupPadding
   property int contentWidth: Style.space(280)
   property int contentHeight: Style.space(200)
-  property var borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+  property var borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(1)))
+  property int cardRadius: Math.max(Style.cornerRadius, 14)
   property bool centerOnBar: false
   property bool open: false
   property bool pinned: false
@@ -56,7 +57,13 @@ PanelWindow {
   property var savedPosition: null
   signal positionMoved(real x, real y)
   readonly property bool containsMouse: cardHover.hovered
-  property real chromeOpacity: !pinned || containsMouse ? 1 : 0
+  // Keep chrome up while a nested modal (dropdown/popup) owns the pointer,
+  // even when that surface extends outside the card hit-test bounds.
+  property bool chromeForce: false
+  property real chromeOpacity: !pinned || containsMouse || chromeForce ? 1 : 0
+  // Screen-space rect for an open dropdown that hangs outside the card.
+  // Combined into the input mask so pinned mode still delivers clicks there.
+  property rect extraInput: Qt.rect(0, 0, 0, 0)
   Behavior on chromeOpacity {
     NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
   }
@@ -149,6 +156,13 @@ PanelWindow {
     y: root.pinned ? root.cardOrigin.y : 0
     width: root.pinned ? root.contentWidth : root.screenW
     height: root.pinned ? root.contentHeight : root.screenH
+    // Pinned mask is card-only; include an open dropdown that overflows it.
+    Region {
+      x: Math.round(root.extraInput.x)
+      y: Math.round(root.extraInput.y)
+      width: Math.round(root.extraInput.width)
+      height: Math.round(root.extraInput.height)
+    }
   }
 
   // Track every layout change between the bar's contentItem and the
@@ -434,7 +448,7 @@ PanelWindow {
       color: Color.popups.background
       borderSpec: root.borderSpec
       padding: root.padding
-      radius: Style.cornerRadius
+      radius: root.cardRadius
       opacity: root.chromeOpacity
     }
 
