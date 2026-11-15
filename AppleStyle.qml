@@ -72,6 +72,11 @@ QtObject {
     readonly property string iconLock: String.fromCodePoint(0xF033E)
     readonly property string iconLoading: String.fromCodePoint(0xF0772)
     readonly property string iconCamera: String.fromCodePoint(0xF07AE)
+    readonly property string iconPlay: String.fromCodePoint(0xF040A)
+    readonly property string iconPause: String.fromCodePoint(0xF03E4)
+    readonly property string iconReplay: String.fromCodePoint(0xF0459)
+    readonly property string iconDownload: String.fromCodePoint(0xF01DA)
+    readonly property string iconImage: String.fromCodePoint(0xF02E9)
 
     function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
     function luminance(color) { return 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b }

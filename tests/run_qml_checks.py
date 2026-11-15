@@ -27,8 +27,41 @@ with tempfile.TemporaryDirectory(prefix="camera-checks-") as temporary:
         "color=c=blue:s=320x240:r=1/10", "-t", "20", "-c:v", "mpeg4",
         str(work / "stall.mp4")
     ], check=True)
+    # A real HEVC (hvc1) MP4 like sdclip.py makes, and a stand-in for sdclip.py.
+    subprocess.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "testsrc=size=320x240:rate=12", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=8000",
+        "-t", "4", "-c:v", "libx265", "-x265-params", "log-level=none", "-tag:v", "hvc1",
+        "-c:a", "aac", "-shortest", str(work / "clip.mp4")
+    ], check=True)
+    (work / "fake_clip.py").write_text('''import json, os, signal, sys, time
+work = os.path.dirname(os.path.abspath(__file__))
+args = sys.argv[1:]
+camera = args[args.index("--camera") + 1]
+def say(data):
+    print(json.dumps(data), flush=True)
+if "--save" in args:
+    open(os.path.join(work, "clip-saved"), "w").write(args[args.index("--save") + 1])
+    say({"ok": True, "path": os.path.join(work, "saved.mp4")})
+elif camera == "front":
+    say({"progress": 262144})
+    say({"ok": True, "path": os.path.join(work, "clip.mp4"), "partial": True})
+elif camera == "broken":
+    say({"ok": False, "error": "no-recording"})
+    sys.exit(1)
+elif camera == "slow":
+    def cancelled(*_):
+        open(os.path.join(work, "clip-cancelled"), "w").write("cancelled")
+        say({"ok": False, "error": "cancelled"})
+        sys.exit(1)
+    signal.signal(signal.SIGTERM, cancelled)
+    say({"progress": 1048576})
+    time.sleep(30)
+''')
     environment = dict(os.environ, XDG_CONFIG_HOME=str(work / "config"),
                        QT_QUICK_CONTROLS_STYLE="Basic", CAMERA_CLOCK_TICKS=str(os.sysconf("SC_CLK_TCK")))
+    environment["CAMERA_TEST_FAKE_CLIP"] = str(work / "fake_clip.py")
+    environment["QML_XHR_ALLOW_FILE_READ"] = "1"
     screen = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--screen=")), "")
     if screen:
         environment["CAMERA_TEST_SCREEN"] = screen

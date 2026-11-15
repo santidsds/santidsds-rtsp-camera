@@ -105,6 +105,23 @@ when installed, otherwise Inter, otherwise the Omarchy font.
   to save one still now. Without the service you can still browse stills already on
   disk; opening **Motion** only lists files, it does not start the loop.
 
+- **Play a motion clip from the SD card** — in the Motion viewer, **Play Clip**
+  (Spanish: *Ver clip*) fetches the recording around that still straight from
+  the camera's SD card: from 4 s before it to at least 20 s after, extended to
+  the end of the camera's motion recording (max 90 s). Space plays/pauses,
+  Esc returns to the still, ←/→ move on (and cancel a download).
+  - Works for cameras reached over DVRIP (XMeye/iCSee: behind the go2rtc
+    bridge, or with a login saved by `motiond.py --set-login`).
+  - Only the tapped clip is downloaded — nothing is synced in the background.
+    Clips stay in `~/.cache/rtsp-camera/clips/` (0700, files 0600) for 24 h
+    (400 MB max); the download button copies one to
+    `Videos/Cameras/<camera>/`.
+  - Video is remuxed, not re-encoded (HEVC/H.264 → MP4, G.711 audio → AAC).
+  - Gentle on weak cameras: one login per tap, no automatic retries, downloads
+    paced to ~320 KB/s, always stopped on cancel; a camera that stalls gives a
+    partial clip, marked as such.
+  - CLI: `python3 sdclip.py --camera <id> --at "YYYY-MM-DD HH:MM:SS"`.
+
 - **Stream pauses for the gallery** — player tears down while Motion is open;
   **Live** reconnects.
 
@@ -119,7 +136,9 @@ when installed, otherwise Inter, otherwise the Omarchy font.
   `hovered`).
 
 - **Tests** — `test_motiond.py` (prune/list/creds, bridge resolution, per-camera
-  storage, a fake DVRIP camera; no network) + existing
+  storage, a fake DVRIP camera; no network), `test_sdclip.py` (XM parsing,
+  clip window, packet recovery, a fake camera end to end with real HEVC,
+  pacing, cancel, cache, save) + existing
   `test_config.py`. `.gitignore` also excludes `motion.json`,
   `appearance.json`, `position-*.json`, `.profiles.lock`, `.status.json`.
 

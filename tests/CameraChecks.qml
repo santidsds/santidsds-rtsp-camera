@@ -1,4 +1,5 @@
 import QtQuick
+import QtMultimedia
 import QtTest
 import Quickshell
 import Quickshell.Io
@@ -63,7 +64,7 @@ ShellRoot {
                 else if (Quickshell.env("CAMERA_TEST_BENCHMARK") === "1") probe.runVideoStyles(true)
                 else {
                     probe.runAppearance(); probe.runOverlayPixels(); probe.runEffectPixels(); probe.runDrag()
-                    probe.runAppleChrome(); probe.runMotionGallery()
+                    probe.runAppleChrome(); probe.runMotionGallery(); probe.runMotionClip()
                     if (Quickshell.env("CAMERA_TEST_UI_ONLY") !== "1") { probe.runVideoStyles(false); probe.runReconnect() }
                     probe.runProfiles()
                 }
@@ -270,6 +271,83 @@ ShellRoot {
             panel.close()
             panel.configured = false
             console.log("PASS: gallery empty state, grid, plain captions, viewer navigation, camera filter, listener status and Esc")
+        }
+        function runMotionClip() {
+            panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
+            panel.configured = true; panel.configuring = false
+            panel.pinned = true; panel.open()
+            var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
+            var content = popup.contentItem[0]
+            parent = content
+            function field(name) { return find(content, function(i) { return i.objectName === name }) }
+            panel.openMotionGallery()
+            var gallery = field("motionGallery")
+            eventually(function() { return gallery.visible && !gallery.loading && gallery.listenerState !== "" }, 6000)
+            gallery.clipHelper = Quickshell.env("CAMERA_TEST_FAKE_CLIP")
+            gallery.clipSources = {front: "dvrip", slow: "dvrip", broken: "dvrip", plain: "onvif"}
+            gallery.items = [
+                {name: "f.jpg", path: "/nonexistent/f.jpg", time: "23:00:00", date: gallery.today, cameraId: "front", cameraName: "Front"},
+                {name: "s.jpg", path: "/nonexistent/s.jpg", time: "22:00:00", date: gallery.today, cameraId: "slow", cameraName: "Slow"},
+                {name: "b.jpg", path: "/nonexistent/b.jpg", time: "21:00:00", date: gallery.today, cameraId: "broken", cameraName: "Broken"},
+                {name: "p.jpg", path: "/nonexistent/p.jpg", time: "20:00:00", date: gallery.today, cameraId: "plain", cameraName: "Plain"}]
+            wait(100)
+            gallery.selectedIndex = 0
+            gallery.forceActiveFocus()
+            var play = field("clipPlayButton")
+            assertOk(play.visible && play.enabled, "a DVRIP camera's still offers Play Clip")
+            wait(300)
+            capture(content, "clip-offer")
+            mouseClick(play)
+            var player = field("clipPlayer")
+            eventually(function() { return gallery.clipState === "ready" }, 4000)
+            eventually(function() { return player.playbackState === MediaPlayer.PlayingState && player.hasVideo }, 6000)
+            assertOk(field("clipView").visible && field("clipSeek").visible, "the clip plays with a seek bar")
+            assertOk(field("clipPartialNote").visible, "a partial clip says so")
+            wait(400)
+            capture(content, "clip-playing")
+            keyClick(Qt.Key_Space)
+            eventually(function() { return player.playbackState === MediaPlayer.PausedState }, 2000)
+            keyClick(Qt.Key_Space)
+            eventually(function() { return player.playbackState === MediaPlayer.PlayingState }, 2000)
+            mouseClick(field("clipSave"))
+            eventually(function() { return gallery.saveState === "saved" }, 4000)
+            keyClick(Qt.Key_Escape)
+            assertOk(gallery.clipState === "" && gallery.selectedIndex === 0, "Esc closes the clip before the viewer")
+            assertOk(player.playbackState === MediaPlayer.StoppedState, "closing the clip stops playback")
+            // A slow download is cancelled (SIGTERM, so the camera is told to stop) by moving to another still.
+            keyClick(Qt.Key_Right)
+            equal(gallery.selectedIndex, 1, "right arrow moves to the slow camera's still")
+            keyClick(Qt.Key_Space)
+            eventually(function() { return gallery.clipState === "fetching" && gallery.clipProgress > 0 }, 4000)
+            assertOk(field("clipFetchingLabel").visible && field("clipFetchingLabel").text.indexOf("MB") > 0,
+                "fetching shows the downloaded size")
+            capture(content, "clip-fetching")
+            keyClick(Qt.Key_Right)
+            assertOk(gallery.clipState === "" && gallery.selectedIndex === 2, "moving on cancels the download")
+            // Asking for the next clip at once waits for the cancelled one to stop, then starts.
+            mouseClick(field("clipPlayButton"))
+            eventually(function() { return gallery.clipState === "error" }, 4000)
+            keyClick(Qt.Key_Escape)
+            eventually(function() {
+                var marker = new XMLHttpRequest()
+                marker.open("GET", Qt.resolvedUrl("clip-cancelled"), false)
+                try { marker.send() } catch (error) { return false }
+                return marker.responseText === "cancelled"
+            }, 4000)
+            // An error offers a retry.
+            mouseClick(field("clipPlayButton"))
+            eventually(function() { return gallery.clipState === "error" }, 4000)
+            assertOk(field("clipErrorMessage").visible && field("clipErrorMessage").text === gallery.clipErrorText("no-recording")
+                && field("clipRetry").visible, "an error explains itself and offers a retry")
+            capture(content, "clip-error")
+            keyClick(Qt.Key_Escape)
+            keyClick(Qt.Key_Right)
+            assertOk(!field("clipPlayButton").visible, "cameras without DVRIP don't offer clips")
+            keyClick(Qt.Key_Escape)
+            keyClick(Qt.Key_Escape)
+            panel.close()
+            panel.configured = false
+            console.log("PASS: clip play/pause/save, Esc order, cancel on navigation, error and retry, unsupported cameras")
         }
         function runDualView() {
             panel.close()

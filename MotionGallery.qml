@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import QtQuick.Effects
+import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -41,6 +42,91 @@ FocusScope {
     property string listenerDetails: ""
     readonly property string today: Qt.formatDate(new Date(), "yyyy-MM-dd")
     signal closed()
+
+    // SD clips: a camera whose motion source is DVRIP (XMeye/iCSee) can send the
+    // recording around a still. Only the tapped clip is downloaded (sdclip.py).
+    property string clipHelper: Qt.resolvedUrl("sdclip.py").toString().replace(/^file:\/\//, "")
+    property var clipSources: ({})
+    property string clipState: ""   // "", "fetching", "ready", "error"
+    property string clipPath: ""
+    property string clipError: ""
+    property real clipProgress: 0
+    property bool clipPartial: false
+    property bool clipPending: false  // a new clip waits for a cancelled download to finish stopping
+    property string saveState: ""   // "", "saving", "saved", "error"
+    readonly property var previewItem: selectedIndex >= 0 && selectedIndex < visibleItems.length
+        ? visibleItems[selectedIndex] : null
+    readonly property bool clipAvailable: previewItem !== null
+        && clipSources[previewItem.cameraId || ""] === "dvrip"
+        && /^\d{4}-\d{2}-\d{2}$/.test(String(previewItem.date || ""))
+        && /^\d{2}:\d{2}:\d{2}$/.test(String(previewItem.time || ""))
+    onSelectedIndexChanged: closeClip()
+
+    function clipErrorText(code) {
+        var keys = {"no-recording": "clip.error.noRecording", "login": "clip.error.login",
+            "unreachable": "clip.error.unreachable", "timeout": "clip.error.timeout", "busy": "clip.error.busy",
+            "empty": "clip.error.empty", "unsupported": "clip.error.unsupported"}
+        return strings.t(keys[code] || "clip.error.failed")
+    }
+    function megabytes(bytes) {
+        return strings.t("clip.megabytes").arg(Qt.locale(Commons.I18n.formatLocale).toString(bytes / 1048576, "f", 1))
+    }
+    function clock(ms) {
+        var seconds = Math.max(0, Math.floor(ms / 1000))
+        return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0")
+    }
+    function playClip() {
+        if (!clipAvailable) return
+        clipPath = ""; clipError = ""; clipProgress = 0; clipPartial = false; saveState = ""
+        clipState = "fetching"
+        forceActiveFocus()
+        if (clipFetcher.running) clipPending = true
+        else startFetch()
+    }
+    function startFetch() {
+        clipFetcher.gotResult = false
+        clipFetcher.command = ["python3", clipHelper, "--camera", String(previewItem.cameraId),
+            "--at", previewItem.date + " " + previewItem.time]
+        clipFetcher.running = true
+    }
+    // Leaving a clip stops playback and cancels a download (sdclip.py then tells
+    // the camera to stop sending, which matters for weak cameras).
+    function closeClip() {
+        clipPlayer.stop()
+        if (clipFetcher.running) clipFetcher.running = false
+        clipPending = false
+        clipState = ""; clipPath = ""; clipError = ""; clipProgress = 0; clipPartial = false; saveState = ""
+    }
+    function toggleClip() {
+        if (clipState !== "ready") return
+        if (clipPlayer.playbackState === MediaPlayer.PlayingState) clipPlayer.pause()
+        else {
+            if (clipPlayer.mediaStatus === MediaPlayer.EndOfMedia) clipPlayer.setPosition(0)
+            clipPlayer.play()
+        }
+    }
+    function saveClip() {
+        if (clipState !== "ready" || clipSaver.running || saveState === "saved" || !previewItem) return
+        saveState = "saving"
+        clipSaver.command = ["python3", clipHelper, "--camera", String(previewItem.cameraId), "--save", clipPath]
+        clipSaver.running = true
+    }
+    function handleClipLine(line) {
+        var message
+        try { message = JSON.parse(line) } catch (error) { return }
+        if (!message || typeof message !== "object" || clipPending) return  // the cancelled download's last words
+        if (typeof message.progress === "number") { clipProgress = message.progress; return }
+        clipFetcher.gotResult = true
+        if (clipState !== "fetching") return  // cancelled meanwhile
+        if (message.ok === true && typeof message.path === "string" && message.path !== "") {
+            clipPartial = message.partial === true
+            clipPath = message.path
+            clipState = "ready"
+        } else {
+            clipError = String(message.error || "failed")
+            clipState = "error"
+        }
+    }
 
     function step(delta) {
         if (selectedIndex < 0 || visibleItems.length === 0) return
@@ -107,6 +193,11 @@ FocusScope {
     }
 
     Keys.onEscapePressed: function(event) {
+        if (clipState !== "") {
+            closeClip()
+            event.accepted = true
+            return
+        }
         if (selectedIndex >= 0) {
             selectedIndex = -1
             event.accepted = true
@@ -117,6 +208,11 @@ FocusScope {
     }
     Keys.onLeftPressed: function(event) { event.accepted = selectedIndex >= 0; step(-1) }
     Keys.onRightPressed: function(event) { event.accepted = selectedIndex >= 0; step(1) }
+    Keys.onSpacePressed: function(event) {
+        event.accepted = clipState === "ready" || (clipState === "" && clipAvailable)
+        if (clipState === "ready") toggleClip()
+        else if (clipState === "" && clipAvailable) playClip()
+    }
 
     Component.onCompleted: refresh()
 
@@ -160,7 +256,12 @@ FocusScope {
                 return
             }
             try {
-                var summary = root.summarizeStatus(JSON.parse(statusStdout.text || "{}"))
+                var status = JSON.parse(statusStdout.text || "{}")
+                var sources = {}
+                if (status.cameras && typeof status.cameras === "object")
+                    for (var id in status.cameras) sources[id] = String((status.cameras[id] || {}).source || "")
+                root.clipSources = sources
+                var summary = root.summarizeStatus(status)
                 root.listenerState = summary.state
                 root.statusLine = summary.line
                 root.listenerDetails = summary.details
@@ -184,10 +285,40 @@ FocusScope {
     }
 
     onVisibleChanged: {
+        if (!root.visible) root.closeClip()
         if (root.visible) {
             root.refresh()
             statusReader.running = false
             statusReader.running = true
+        }
+    }
+
+    Process {
+        id: clipFetcher
+        property bool gotResult: false
+        stdout: SplitParser { onRead: function(line) { root.handleClipLine(line) } }
+        onExited: function(code) {
+            if (root.clipPending) {
+                root.clipPending = false
+                if (root.clipState === "fetching" && root.clipAvailable) root.startFetch()
+                return
+            }
+            if (root.clipState === "fetching" && !gotResult) {
+                root.clipError = "failed"
+                root.clipState = "error"
+            }
+        }
+    }
+    Process {
+        id: clipSaver
+        stdout: StdioCollector { id: saveStdout }
+        onExited: function(code) {
+            try {
+                var lines = saveStdout.text.trim().split("\n")
+                root.saveState = JSON.parse(lines[lines.length - 1]).ok === true ? "saved" : "error"
+            } catch (error) {
+                root.saveState = "error"
+            }
         }
     }
 
@@ -472,11 +603,13 @@ FocusScope {
             onClicked: root.selectedIndex = -1
         }
         Image {
+            id: stillImage
             anchors.fill: parent
             anchors.leftMargin: 56
             anchors.rightMargin: 56
             anchors.topMargin: 48
-            anchors.bottomMargin: 24
+            anchors.bottomMargin: 64
+            visible: root.clipState !== "ready"
             source: root.selectedSource
             fillMode: Image.PreserveAspectFit
             asynchronous: true
@@ -493,6 +626,190 @@ FocusScope {
             font.pixelSize: ui.callout
             font.weight: Font.DemiBold
             font.features: { "tnum": 1 }
+        }
+        // The clip plays where the still was; clicking the video toggles playback.
+        Item {
+            id: clipView
+            objectName: "clipView"
+            anchors.fill: stillImage
+            visible: root.clipState === "ready"
+            MediaPlayer {
+                id: clipPlayer
+                objectName: "clipPlayer"
+                source: root.clipState === "ready" && root.clipPath !== "" ? "file://" + root.clipPath : ""
+                videoOutput: clipVideo
+                audioOutput: AudioOutput {}
+                onSourceChanged: if (source.toString() !== "") play()
+            }
+            VideoOutput {
+                id: clipVideo
+                anchors.fill: parent
+                fillMode: VideoOutput.PreserveAspectFit
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.toggleClip()
+            }
+            // A slow camera can leave a clip short; say so on the video itself.
+            Rectangle {
+                objectName: "clipPartialNote"
+                visible: root.clipPartial
+                x: Math.max(8, (parent.width - clipVideo.contentRect.width) / 2 + 8)
+                y: Math.max(8, (parent.height - clipVideo.contentRect.height) / 2 + 8)
+                width: Math.min(partialText.implicitWidth + 20, parent.width - 16)
+                height: 24
+                radius: height / 2
+                color: Qt.rgba(0, 0, 0, 0.6)
+                MacText {
+                    id: partialText
+                    anchors.centerIn: parent
+                    width: Math.min(implicitWidth, parent.width - 20)
+                    text: strings.t("clip.partial")
+                    color: ui.systemOrange
+                    font.pixelSize: ui.caption
+                    font.weight: Font.DemiBold
+                }
+            }
+        }
+
+        // Bottom bar: "Play clip", download progress, an error, or player controls.
+        Rectangle {
+            id: clipBar
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 14
+            // Controls span the viewer (the seek bar takes the free space); other states hug their content.
+            width: root.clipState === "ready" ? Math.min(parent.width - 32, 640)
+                : Math.min(parent.width - 32, clipRow.implicitWidth + 24)
+            height: 40
+            radius: height / 2
+            visible: root.clipState !== "" || root.clipAvailable
+            color: root.clipState === "" ? "transparent" : Qt.rgba(0.12, 0.12, 0.13, 0.82)
+            border.width: root.clipState === "" ? 0 : 1
+            border.color: Qt.rgba(1, 1, 1, 0.12)
+            MouseArea { anchors.fill: parent }  // keep clicks from closing the viewer
+            RowLayout {
+                id: clipRow
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 10
+
+                GlassPill {
+                    objectName: "clipPlayButton"
+                    visible: root.clipState === ""
+                    glyph: ui.iconPlay
+                    text: strings.t("clip.play")
+                    onClicked: root.playClip()
+                }
+
+                // Fetching
+                Text {
+                    visible: root.clipState === "fetching"
+                    textFormat: Text.PlainText
+                    text: ui.iconLoading
+                    font.family: ui.iconFont
+                    font.pixelSize: 16
+                    color: "white"
+                    RotationAnimator on rotation {
+                        from: 0; to: 360; duration: 1000; loops: Animation.Infinite
+                        running: root.clipState === "fetching" && root.visible
+                    }
+                }
+                MacText {
+                    objectName: "clipFetchingLabel"
+                    visible: root.clipState === "fetching"
+                    Layout.fillWidth: true
+                    text: strings.t("clip.fetching") + (root.clipProgress > 0 ? "  " + root.megabytes(root.clipProgress) : "")
+                    color: "white"
+                    font.pixelSize: ui.callout
+                    font.features: { "tnum": 1 }
+                }
+                GlassPill {
+                    objectName: "clipCancel"
+                    visible: root.clipState === "fetching"
+                    text: strings.t("clip.cancel")
+                    onClicked: root.closeClip()
+                }
+
+                // Error
+                MacText {
+                    objectName: "clipErrorMessage"
+                    visible: root.clipState === "error"
+                    Layout.fillWidth: true
+                    text: root.clipState === "error" ? root.clipErrorText(root.clipError) : ""
+                    color: "white"
+                    font.pixelSize: ui.callout
+                }
+                GlassPill {
+                    objectName: "clipRetry"
+                    visible: root.clipState === "error"
+                    text: strings.t("clip.retry")
+                    onClicked: root.playClip()
+                }
+
+                // Player
+                GlassButton {
+                    objectName: "clipToggle"
+                    visible: root.clipState === "ready"
+                    implicitWidth: 28
+                    implicitHeight: 28
+                    text: clipPlayer.playbackState === MediaPlayer.PlayingState ? ui.iconPause
+                        : clipPlayer.mediaStatus === MediaPlayer.EndOfMedia ? ui.iconReplay : ui.iconPlay
+                    tipText: clipPlayer.playbackState === MediaPlayer.PlayingState ? strings.t("clip.pause") : strings.t("clip.resume")
+                    onClicked: root.toggleClip()
+                }
+                MacText {
+                    visible: root.clipState === "ready"
+                    text: root.clock(clipPlayer.position)
+                    color: "white"
+                    font.pixelSize: ui.caption
+                    font.features: { "tnum": 1 }
+                }
+                MacSlider {
+                    id: clipSeek
+                    objectName: "clipSeek"
+                    visible: root.clipState === "ready"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 60
+                    focusPolicy: Qt.NoFocus
+                    from: 0
+                    to: Math.max(1, clipPlayer.duration)
+                    onMoved: clipPlayer.setPosition(value)
+                    Binding on value {
+                        when: !clipSeek.pressed
+                        value: clipPlayer.position
+                    }
+                }
+                MacText {
+                    visible: root.clipState === "ready"
+                    text: root.clock(clipPlayer.duration)
+                    color: Qt.rgba(1, 1, 1, 0.7)
+                    font.pixelSize: ui.caption
+                    font.features: { "tnum": 1 }
+                }
+                GlassButton {
+                    objectName: "clipSave"
+                    visible: root.clipState === "ready"
+                    implicitWidth: 28
+                    implicitHeight: 28
+                    enabled: root.saveState !== "saving"
+                    text: root.saveState === "saved" ? ui.iconCheck : ui.iconDownload
+                    tipText: root.saveState === "saved" ? strings.t("clip.saved")
+                        : root.saveState === "error" ? strings.t("clip.saveFailed") : strings.t("clip.save")
+                    onClicked: root.saveClip()
+                }
+                GlassButton {
+                    objectName: "clipShowStill"
+                    visible: root.clipState === "ready"
+                    implicitWidth: 28
+                    implicitHeight: 28
+                    text: ui.iconImage
+                    tipText: strings.t("clip.showStill")
+                    onClicked: root.closeClip()
+                }
+            }
         }
         GlassButton {
             objectName: "motionPreviewClose"
@@ -521,6 +838,47 @@ FocusScope {
             enabled: root.selectedIndex < root.visibleItems.length - 1
             onClicked: root.step(1)
         }
+    }
+
+    // Text (optionally with an icon) on a translucent capsule, for the dark viewer.
+    component GlassPill: Controls.Button {
+        id: glassPill
+        property string glyph: ""
+        implicitHeight: 30
+        leftPadding: 14
+        rightPadding: 14
+        hoverEnabled: true
+        focusPolicy: Qt.TabFocus
+        Accessible.name: text
+        opacity: enabled ? 1 : 0.4
+        contentItem: Row {
+            spacing: 7
+            Text {
+                visible: glassPill.glyph !== ""
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: glassPill.glyph
+                font.family: ui.iconFont
+                font.pixelSize: 15
+                color: "white"
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: glassPill.text
+                font.family: ui.font
+                font.pixelSize: ui.callout
+                font.weight: Font.DemiBold
+                color: "white"
+            }
+        }
+        background: Rectangle {
+            radius: height / 2
+            color: glassPill.down ? Qt.rgba(1, 1, 1, 0.3) : glassPill.hovered ? Qt.rgba(1, 1, 1, 0.24) : Qt.rgba(1, 1, 1, 0.16)
+            border.width: glassPill.visualFocus ? 2 : 1
+            border.color: glassPill.visualFocus ? ui.alpha(ui.accent, 0.9) : Qt.rgba(1, 1, 1, 0.16)
+        }
+        PointerArea { visible: glassPill.enabled }
     }
 
     component GlassButton: Controls.Button {
