@@ -125,5 +125,16 @@
   "recordings.error.unsupported": "Esta cámara no permite explorar su tarjeta SD acá.",
   "recordings.error.failed": "No se pudo leer la tarjeta SD.",
   "recordings.speed": "Reproducir a %1×",
-  "recordings.connectingAt": "Cargando %1 desde la tarjeta SD…"
+  "recordings.connectingAt": "Cargando %1 desde la tarjeta SD…",
+  "motion.events": {
+    "one": "%1 evento",
+    "other": "%1 eventos"
+  },
+  "motion.lastHour": "Última hora",
+  "motion.lastNight": "Anoche",
+  "motion.openInRecordings": "Ver en Grabaciones",
+  "motion.saveClip": "Guardar clip",
+  "motion.savingClip": "Guardando clip…",
+  "motion.allCameras": "Todas las cámaras",
+  "motion.emptyFiltered": "No hay eventos en este período"
 }

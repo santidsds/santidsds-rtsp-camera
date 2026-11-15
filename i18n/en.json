@@ -125,5 +125,16 @@
   "recordings.error.unsupported": "This camera can't browse its SD card here.",
   "recordings.error.failed": "Couldn't read the SD card.",
   "recordings.speed": "Play at %1× speed",
-  "recordings.connectingAt": "Loading %1 from the SD card…"
+  "recordings.connectingAt": "Loading %1 from the SD card…",
+  "motion.events": {
+    "one": "%1 event",
+    "other": "%1 events"
+  },
+  "motion.lastHour": "Last Hour",
+  "motion.lastNight": "Last Night",
+  "motion.openInRecordings": "Watch in Recordings",
+  "motion.saveClip": "Save Clip",
+  "motion.savingClip": "Saving clip…",
+  "motion.allCameras": "All Cameras",
+  "motion.emptyFiltered": "No events in this period"
 }

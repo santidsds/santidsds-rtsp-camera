@@ -3,24 +3,29 @@ import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import QtQuick.Effects
-import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 
-// Grid of motion stills saved by motiond.py (last 24h). Local files only.
+// Motion events from the last 24 hours (stills saved by motiond.py), grouped by
+// hour, with bursts from one camera collapsed into a single tile. A still opens
+// in a viewer whose main action jumps to that moment in Recordings.
 FocusScope {
     id: root
     Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
     AppleStyle { id: ui }
+
     // Index into visibleItems of the still open in the viewer, or -1 for the grid.
     property int selectedIndex: -1
     readonly property url selectedSource: selectedIndex >= 0 && selectedIndex < visibleItems.length
         ? "file://" + visibleItems[selectedIndex].path : ""
-    // Camera filter: "" shows every camera.
+    // Camera filter ("" = every camera), driven by the toolbar's camera menu.
     property string cameraFilter: ""
+    // Time filter: everything, the last hour, today, or last night (22:00-07:00).
+    property string timeFilter: "all"
+    readonly property var timeFilterKeys: ["all", "hour", "today", "night"]
     readonly property var cameraOptions: {
         var seen = {}, options = []
         for (var i = 0; i < items.length; i++) {
@@ -32,106 +37,73 @@ FocusScope {
         options.sort(function(a, b) { return a.name.localeCompare(b.name) })
         return options
     }
-    readonly property string activeFilter: cameraOptions.some(function(o) { return o.id === root.cameraFilter })
-        ? cameraFilter : ""
-    readonly property var visibleItems: activeFilter === "" ? items
-        : items.filter(function(item) { return (item.cameraId || "") === root.activeFilter })
+    readonly property string activeFilter: cameraFilter
+    readonly property var visibleItems: items.filter(function(item) {
+        return (activeFilter === "" || (item.cameraId || "") === activeFilter) && inTimeFilter(item)
+    })
     readonly property bool showCameraNames: cameraOptions.length > 1 && activeFilter === ""
     onActiveFilterChanged: selectedIndex = -1
+    onTimeFilterChanged: selectedIndex = -1
     property string listenerState: ""
     property string listenerDetails: ""
     readonly property string today: Qt.formatDate(new Date(), "yyyy-MM-dd")
     signal closed()
+    signal openInRecordings(string cameraId, string date, string time)
 
-    // SD clips: a camera whose motion source is DVRIP (XMeye/iCSee) can send the
-    // recording around a still. Only the tapped clip is downloaded (sdclip.py).
-    property string clipHelper: Qt.resolvedUrl("sdclip.py").toString().replace(/^file:\/\//, "")
-    property var clipSources: ({})
-    property string clipState: ""   // "", "fetching", "ready", "error"
-    property string clipPath: ""
-    property string clipError: ""
-    property real clipProgress: 0
-    property bool clipPartial: false
-    property bool clipPending: false  // a new clip waits for a cancelled download to finish stopping
-    property string saveState: ""   // "", "saving", "saved", "error"
-    property string savingPath: ""
-    // A refused login must not be retried by hand: each try counts toward the camera's lockout.
-    readonly property bool clipRetryable: clipError !== "login" && clipError !== "unsupported"
-    readonly property var previewItem: selectedIndex >= 0 && selectedIndex < visibleItems.length
-        ? visibleItems[selectedIndex] : null
-    readonly property bool clipAvailable: previewItem !== null
-        && clipSources[previewItem.cameraId || ""] === "dvrip"
-        && /^\d{4}-\d{2}-\d{2}$/.test(String(previewItem.date || ""))
-        && /^\d{2}:\d{2}:\d{2}$/.test(String(previewItem.time || ""))
-    onSelectedIndexChanged: closeClip()
-
-    function clipErrorText(code) {
-        var keys = {"no-recording": "clip.error.noRecording", "login": "clip.error.login",
-            "unreachable": "clip.error.unreachable", "timeout": "clip.error.timeout", "busy": "clip.error.busy",
-            "empty": "clip.error.empty", "unsupported": "clip.error.unsupported"}
-        return strings.t(keys[code] || "clip.error.failed")
-    }
-    function megabytes(bytes) {
-        return strings.t("clip.megabytes").arg(Qt.locale(Commons.I18n.formatLocale).toString(bytes / 1048576, "f", 1))
-    }
-    function clock(ms) {
-        var seconds = Math.max(0, Math.floor(ms / 1000))
-        return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0")
-    }
-    function playClip() {
-        if (!clipAvailable) return
-        clipPath = ""; clipError = ""; clipProgress = 0; clipPartial = false; saveState = ""
-        clipState = "fetching"
-        forceActiveFocus()
-        if (clipFetcher.running) clipPending = true
-        else startFetch()
-    }
-    function startFetch() {
-        clipFetcher.gotResult = false
-        clipFetcher.command = ["python3", clipHelper, "--camera", String(previewItem.cameraId),
-            "--at", previewItem.date + " " + previewItem.time]
-        clipFetcher.running = true
-    }
-    // Leaving a clip stops playback and cancels a download (sdclip.py then tells
-    // the camera to stop sending, which matters for weak cameras).
-    function closeClip() {
-        clipPlayer.stop()
-        if (clipFetcher.running) clipFetcher.running = false
-        clipPending = false
-        clipState = ""; clipPath = ""; clipError = ""; clipProgress = 0; clipPartial = false; saveState = ""
-    }
-    function toggleClip() {
-        if (clipState !== "ready") return
-        if (clipPlayer.playbackState === MediaPlayer.PlayingState) clipPlayer.pause()
-        else {
-            if (clipPlayer.mediaStatus === MediaPlayer.EndOfMedia) clipPlayer.setPosition(0)
-            clipPlayer.play()
+    // Bursts: consecutive stills from one camera less than a minute apart are one event.
+    readonly property var groups: {
+        var result = []
+        for (var i = 0; i < visibleItems.length; i++) {
+            var item = visibleItems[i], at = stamp(item), last = result.length ? result[result.length - 1] : null
+            if (last && last.cameraId === (item.cameraId || "") && last.date === item.date
+                    && !isNaN(at) && !isNaN(last.lastStamp) && Math.abs(last.lastStamp - at) <= 60000) {
+                last.count++
+                last.lastStamp = at
+                continue
+            }
+            result.push({first: i, count: 1, cameraId: item.cameraId || "", date: item.date, lastStamp: at,
+                section: isNaN(at) ? "" : Qt.formatDateTime(new Date(at), "yyyy-MM-dd HH")})
         }
+        return result
     }
-    function saveClip() {
-        if (clipState !== "ready" || clipSaver.running || saveState === "saved" || !previewItem) return
-        saveState = "saving"
-        savingPath = clipPath
-        clipSaver.command = ["python3", clipHelper, "--camera", String(previewItem.cameraId), "--save", clipPath]
-        clipSaver.running = true
-    }
-    function handleClipLine(line) {
-        var message
-        try { message = JSON.parse(line) } catch (error) { return }
-        if (!message || typeof message !== "object" || clipPending) return  // the cancelled download's last words
-        if (typeof message.progress === "number") { clipProgress = message.progress; return }
-        clipFetcher.gotResult = true
-        if (clipState !== "fetching") return  // cancelled meanwhile
-        if (message.ok === true && typeof message.path === "string" && message.path !== "") {
-            clipPartial = message.partial === true
-            clipPath = message.path
-            clipState = "ready"
-        } else {
-            clipError = String(message.error || "failed")
-            clipState = "error"
+    property int columns: Math.max(2, Math.floor((width - 8) / 190))
+    // Rows for the list: a header per hour, then rows of tiles.
+    readonly property var rows: {
+        var out = [], i = 0
+        while (i < groups.length) {
+            var section = groups[i].section, inSection = []
+            while (i < groups.length && groups[i].section === section) inSection.push(groups[i++])
+            out.push({type: "header", section: section, label: sectionLabel(section, inSection.length)})
+            for (var j = 0; j < inSection.length; j += columns)
+                out.push({type: "tiles", section: section, groups: inSection.slice(j, j + columns)})
         }
+        return out
     }
 
+    function stamp(item) {
+        if (typeof item.mtime === "number") return item.mtime * 1000
+        var parsed = Date.parse(String(item.date || "") + "T" + String(item.time || ""))
+        return isNaN(parsed) ? NaN : parsed
+    }
+    function inTimeFilter(item) {
+        if (timeFilter === "all") return true
+        var at = stamp(item)
+        if (isNaN(at)) return false
+        var now = new Date()
+        if (timeFilter === "hour") return Date.now() - at <= 3600000
+        if (timeFilter === "today") return item.date === Qt.formatDate(now, "yyyy-MM-dd")
+        // Last night: 22:00-07:00 (still running if it's night now).
+        var start = new Date(now), end = new Date(now)
+        if (now.getHours() >= 22) { start.setHours(22, 0, 0, 0) }
+        else { start.setDate(start.getDate() - 1); start.setHours(22, 0, 0, 0); if (now.getHours() >= 7) end.setHours(7, 0, 0, 0) }
+        return at >= start.getTime() && at <= end.getTime()
+    }
+    function sectionLabel(section, count) {
+        var events = strings.tn("motion.events", count).arg(Commons.I18n.formatNumber(count))
+        if (!section) return events
+        var date = section.slice(0, 10), hour = section.slice(11, 13) + ":00"
+        return (date !== today ? dayLabel({date: date}) + " · " : "") + hour + " · " + events
+    }
     function step(delta) {
         if (selectedIndex < 0 || visibleItems.length === 0) return
         selectedIndex = Math.max(0, Math.min(visibleItems.length - 1, selectedIndex + delta))
@@ -189,6 +161,68 @@ FocusScope {
     property string listError: ""
     property string statusLine: ""
 
+    // Cameras on DVRIP (XMeye/iCSee) have recordings on their SD card.
+    property string clipHelper: Qt.resolvedUrl("sdclip.py").toString().replace(/^file:\/\//, "")
+    property var clipSources: ({})
+    readonly property var previewItem: selectedIndex >= 0 && selectedIndex < visibleItems.length
+        ? visibleItems[selectedIndex] : null
+    readonly property bool clipAvailable: previewItem !== null
+        && clipSources[previewItem.cameraId || ""] === "dvrip"
+        && /^\d{4}-\d{2}-\d{2}$/.test(String(previewItem.date || ""))
+        && /^\d{2}:\d{2}:\d{2}$/.test(String(previewItem.time || ""))
+    // "Save clip": download the moment from the SD card, then copy it to Videos.
+    property string saveState: ""   // "", "fetching", "saving", "saved", "error"
+    property string saveError: ""
+    property real saveProgress: 0
+    property string saveFor: ""      // the still the save belongs to
+    readonly property bool saveRetryable: saveError !== "login" && saveError !== "unsupported"
+    onSelectedIndexChanged: cancelSave()
+
+    function openPreviewInRecordings() {
+        if (!clipAvailable) return
+        var item = previewItem
+        selectedIndex = -1
+        openInRecordings(String(item.cameraId), item.date, item.time)
+    }
+    function clipErrorText(code) {
+        var keys = {"no-recording": "clip.error.noRecording", "login": "clip.error.login",
+            "unreachable": "clip.error.unreachable", "timeout": "clip.error.timeout", "busy": "clip.error.busy",
+            "empty": "clip.error.empty", "unsupported": "clip.error.unsupported"}
+        return strings.t(keys[code] || "clip.error.failed")
+    }
+    function megabytes(bytes) {
+        return strings.t("clip.megabytes").arg(Qt.locale(Commons.I18n.formatLocale).toString(bytes / 1048576, "f", 1))
+    }
+    function startSave() {
+        if (!clipAvailable || clipFetcher.running || clipSaver.running) return
+        saveFor = previewItem.path
+        saveState = "fetching"; saveError = ""; saveProgress = 0
+        clipFetcher.gotResult = false
+        clipFetcher.command = ["python3", clipHelper, "--camera", String(previewItem.cameraId),
+            "--at", previewItem.date + " " + previewItem.time]
+        clipFetcher.running = true
+    }
+    // Leaving a still cancels its download (sdclip.py then tells the camera to stop).
+    function cancelSave() {
+        if (clipFetcher.running) clipFetcher.running = false
+        saveState = ""; saveError = ""; saveProgress = 0; saveFor = ""
+    }
+    function handleFetchLine(line) {
+        var message
+        try { message = JSON.parse(line) } catch (error) { return }
+        if (!message || typeof message !== "object" || saveState !== "fetching") return
+        if (typeof message.progress === "number") { saveProgress = message.progress; return }
+        clipFetcher.gotResult = true
+        if (message.ok === true && typeof message.path === "string" && message.path !== "" && previewItem) {
+            saveState = "saving"
+            clipSaver.command = ["python3", clipHelper, "--camera", String(previewItem.cameraId), "--save", message.path]
+            clipSaver.running = true
+        } else {
+            saveError = String(message.error || "failed")
+            saveState = "error"
+        }
+    }
+
     function refresh() {
         if (lister.running) return
         loading = true
@@ -197,11 +231,6 @@ FocusScope {
     }
 
     Keys.onEscapePressed: function(event) {
-        if (clipState !== "") {
-            closeClip()
-            event.accepted = true
-            return
-        }
         if (selectedIndex >= 0) {
             selectedIndex = -1
             event.accepted = true
@@ -212,23 +241,16 @@ FocusScope {
     }
     Keys.onLeftPressed: function(event) { event.accepted = selectedIndex >= 0; step(-1) }
     Keys.onRightPressed: function(event) { event.accepted = selectedIndex >= 0; step(1) }
-    Keys.onSpacePressed: function(event) {
-        event.accepted = clipState === "ready" || (clipState === "" && clipAvailable)
-        if (clipState === "ready") toggleClip()
-        else if (clipState === "" && clipAvailable) playClip()
-    }
+    Keys.onSpacePressed: function(event) { event.accepted = selectedIndex >= 0 && clipAvailable; openPreviewInRecordings() }
+    Keys.onReturnPressed: function(event) { event.accepted = selectedIndex >= 0 && clipAvailable; openPreviewInRecordings() }
 
     Component.onCompleted: refresh()
 
     Process {
         id: lister
         command: ["python3", root.helper, "--list"]
-        stdout: StdioCollector {
-            id: listStdout
-        }
-        stderr: StdioCollector {
-            id: listStderr
-        }
+        stdout: StdioCollector { id: listStdout }
+        stderr: StdioCollector { id: listStderr }
         onExited: function(code) {
             root.loading = false
             if (code !== 0) {
@@ -276,6 +298,31 @@ FocusScope {
             }
         }
     }
+    Process {
+        id: clipFetcher
+        property bool gotResult: false
+        stdout: SplitParser { onRead: function(line) { root.handleFetchLine(line) } }
+        onExited: function(code) {
+            if (root.saveState === "fetching" && !gotResult) {
+                root.saveError = "failed"
+                root.saveState = "error"
+            }
+        }
+    }
+    Process {
+        id: clipSaver
+        stdout: StdioCollector { id: saveStdout }
+        onExited: function(code) {
+            if (root.saveState !== "saving" || !root.previewItem || root.previewItem.path !== root.saveFor) return
+            try {
+                var lines = saveStdout.text.trim().split("\n")
+                root.saveState = JSON.parse(lines[lines.length - 1]).ok === true ? "saved" : "error"
+            } catch (error) {
+                root.saveState = "error"
+            }
+            if (root.saveState === "error" && !root.saveError) root.saveError = "failed"
+        }
+    }
 
     Timer {
         interval: 15000
@@ -289,43 +336,10 @@ FocusScope {
     }
 
     onVisibleChanged: {
-        if (!root.visible) root.closeClip()
-        if (root.visible) {
-            root.refresh()
-            statusReader.running = false
-            statusReader.running = true
-        }
-    }
-
-    Process {
-        id: clipFetcher
-        property bool gotResult: false
-        stdout: SplitParser { onRead: function(line) { root.handleClipLine(line) } }
-        onExited: function(code) {
-            if (root.clipPending) {
-                root.clipPending = false
-                if (root.clipState === "fetching" && root.clipAvailable) root.startFetch()
-                else root.closeClip()
-                return
-            }
-            if (root.clipState === "fetching" && !gotResult) {
-                root.clipError = "failed"
-                root.clipState = "error"
-            }
-        }
-    }
-    Process {
-        id: clipSaver
-        stdout: StdioCollector { id: saveStdout }
-        onExited: function(code) {
-            if (root.savingPath !== root.clipPath) return  // the clip changed meanwhile
-            try {
-                var lines = saveStdout.text.trim().split("\n")
-                root.saveState = JSON.parse(lines[lines.length - 1]).ok === true ? "saved" : "error"
-            } catch (error) {
-                root.saveState = "error"
-            }
-        }
+        if (!root.visible) { root.cancelSave(); return }
+        root.refresh()
+        statusReader.running = false
+        statusReader.running = true
     }
 
     ColumnLayout {
@@ -336,26 +350,27 @@ FocusScope {
             Layout.fillWidth: true
             Layout.topMargin: 2
             spacing: 10
-            ColumnLayout {
-                spacing: 1
-                MacText {
-                    text: strings.t("motion.title")
-                    font.pixelSize: ui.largeTitle
-                    font.weight: Font.Bold
-                }
-                MacText {
-                    objectName: "motionSubtitle"
-                    text: strings.tn("motion.count", root.visibleItems.length).arg(Commons.I18n.formatNumber(root.visibleItems.length))
-                        + " · " + strings.t("motion.window")
-                    color: ui.secondaryLabel
-                    font.pixelSize: ui.callout
-                }
+            MacSegmented {
+                id: timeFilterControl
+                objectName: "motionTimeFilter"
+                model: [strings.t("motion.all"), strings.t("motion.lastHour"), strings.t("motion.today"), strings.t("motion.lastNight")]
+                segmentNames: ["filterAll", "filterHour", "filterToday", "filterNight"]
+                autoSelect: false
+                currentIndex: root.timeFilterKeys.indexOf(root.timeFilter)
+                onActivated: function(index) { root.timeFilter = root.timeFilterKeys[index] }
+            }
+            MacText {
+                objectName: "motionSubtitle"
+                text: strings.tn("motion.events", root.groups.length).arg(Commons.I18n.formatNumber(root.groups.length))
+                color: ui.secondaryLabel
+                font.pixelSize: ui.callout
+                font.features: { "tnum": 1 }
             }
             Item { Layout.fillWidth: true }
             Rectangle {
                 objectName: "listenerChip"
                 visible: root.statusLine !== ""
-                Layout.maximumWidth: Math.max(120, root.width * 0.45)
+                Layout.maximumWidth: Math.max(120, root.width * 0.38)
                 implicitWidth: chipRow.implicitWidth + 22
                 implicitHeight: 26
                 radius: height / 2
@@ -398,41 +413,6 @@ FocusScope {
             }
         }
 
-        // Camera filter: a segmented control for a few cameras, scrolling chips for many.
-        MacSegmented {
-            id: cameraFilterControl
-            objectName: "motionCameraFilter"
-            visible: root.cameraOptions.length > 1 && root.cameraOptions.length <= 3
-            Layout.maximumWidth: Math.min(implicitWidth, root.width)
-            model: [strings.t("motion.all")].concat(root.cameraOptions.map(function(o) { return o.name }))
-            autoSelect: false
-            currentIndex: root.activeFilter === "" ? 0
-                : 1 + root.cameraOptions.findIndex(function(o) { return o.id === root.activeFilter })
-            onActivated: function(index) { root.cameraFilter = index === 0 ? "" : root.cameraOptions[index - 1].id }
-        }
-        Flickable {
-            objectName: "motionCameraChips"
-            visible: root.cameraOptions.length > 3
-            Layout.fillWidth: true
-            implicitHeight: ui.controlHeight
-            contentWidth: chipsRow.implicitWidth
-            boundsBehavior: Flickable.StopAtBounds
-            clip: true
-            Row {
-                id: chipsRow
-                spacing: 6
-                Repeater {
-                    model: [{id: "", name: strings.t("motion.all")}].concat(root.cameraOptions)
-                    MacButton {
-                        required property var modelData
-                        text: modelData.name
-                        role: root.activeFilter === modelData.id ? "default" : "normal"
-                        onClicked: root.cameraFilter = modelData.id
-                    }
-                }
-            }
-        }
-
         MacText {
             Layout.fillWidth: true
             visible: root.listError !== ""
@@ -460,13 +440,14 @@ FocusScope {
             }
             MacText {
                 Layout.alignment: Qt.AlignHCenter
-                text: strings.t("motion.emptyTitle")
+                text: root.items.length ? strings.t("motion.emptyFiltered") : strings.t("motion.emptyTitle")
                 font.pixelSize: ui.headline
                 font.weight: Font.DemiBold
             }
             MacText {
                 Layout.alignment: Qt.AlignHCenter
                 Layout.maximumWidth: Math.min(360, root.width - 32)
+                visible: root.items.length === 0
                 text: strings.t("motion.emptyBody")
                 color: ui.secondaryLabel
                 font.pixelSize: ui.callout
@@ -477,114 +458,90 @@ FocusScope {
             Item { Layout.fillHeight: true }
         }
 
-        GridView {
-            id: grid
-            objectName: "motionGrid"
-            visible: root.visibleItems.length > 0
+        Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            model: root.visibleItems
-            readonly property int columns: Math.max(2, Math.floor(width / 190))
-            cellWidth: Math.floor(width / columns)
-            cellHeight: Math.round(cellWidth * 0.62)
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-            cacheBuffer: cellHeight * 2
-            Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
-
-            delegate: Item {
-                id: tile
-                required property var modelData
-                required property int index
-                width: grid.cellWidth
-                height: grid.cellHeight
-                Item {
-                    id: thumb
-                    anchors.fill: parent
-                    anchors.margins: 3
-                    layer.enabled: true
-                    layer.effect: MultiEffect {
-                        maskEnabled: true
-                        maskSource: thumbMask
-                        maskThresholdMin: 0.5
-                        maskSpreadAtMin: 1.0
-                    }
-                    Rectangle { anchors.fill: parent; color: "#0e0e10" }
-                    Image {
-                        anchors.fill: parent
-                        source: "file://" + tile.modelData.path
-                        fillMode: Image.PreserveAspectCrop
-                        asynchronous: true
-                        cache: false
-                        sourceSize.width: 380
-                        sourceSize.height: 240
-                    }
-                    Rectangle {
+            visible: root.visibleItems.length > 0
+            ListView {
+                id: grid
+                objectName: "motionGrid"
+                anchors.fill: parent
+                model: root.rows
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                cacheBuffer: 600
+                readonly property real cellWidth: Math.floor(width / root.columns)
+                readonly property real cellHeight: Math.round(cellWidth * 0.62)
+                Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+                // The hour the top of the list is in, shown pinned over the list.
+                readonly property string topLabel: {
+                    var row = indexAt(10, contentY + 2)
+                    if (row < 0 || contentY <= 2) return ""
+                    var section = root.rows[row] ? root.rows[row].section : null
+                    for (var i = row; i >= 0; i--)
+                        if (root.rows[i].type === "header" && root.rows[i].section === section) return root.rows[i].label
+                    return ""
+                }
+                delegate: Item {
+                    id: rowItem
+                    required property var modelData
+                    width: grid.width
+                    height: modelData.type === "header" ? 30 : grid.cellHeight
+                    MacText {
+                        objectName: "motionSectionHeader"
+                        visible: rowItem.modelData.type === "header"
                         anchors.left: parent.left
-                        anchors.right: parent.right
+                        anchors.leftMargin: 4
                         anchors.bottom: parent.bottom
-                        height: 34
-                        gradient: Gradient {
-                            GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0) }
-                            GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0.55) }
-                        }
-                    }
-                    Text {
-                        objectName: "stillCameraName"
-                        visible: root.showCameraNames
-                        anchors.right: parent.right
-                        anchors.bottom: parent.bottom
-                        anchors.rightMargin: 8
                         anchors.bottomMargin: 6
-                        width: Math.min(implicitWidth, parent.width * 0.45)
-                        textFormat: Text.PlainText
-                        text: root.cameraLabel(tile.modelData)
-                        font.family: ui.font
-                        font.pixelSize: ui.caption
-                        font.weight: Font.Medium
-                        color: Qt.rgba(1, 1, 1, 0.8)
-                        elide: Text.ElideRight
-                        horizontalAlignment: Text.AlignRight
-                    }
-                    Text {
-                        anchors.left: parent.left
-                        anchors.bottom: parent.bottom
-                        anchors.leftMargin: 8
-                        anchors.bottomMargin: 6
-                        width: parent.width * (root.showCameraNames ? 0.5 : 1) - 16
-                        textFormat: Text.PlainText
-                        text: (tile.modelData.date && tile.modelData.date !== root.today
-                            ? root.dayLabel(tile.modelData) + " · " : "") + (tile.modelData.time || tile.modelData.name || "")
-                        font.family: ui.font
-                        font.pixelSize: ui.caption
+                        text: rowItem.modelData.label || ""
+                        color: ui.secondaryLabel
+                        font.pixelSize: ui.callout
                         font.weight: Font.DemiBold
                         font.features: { "tnum": 1 }
-                        color: "white"
-                        elide: Text.ElideRight
                     }
-                    Rectangle {
-                        anchors.fill: parent
-                        color: "white"
-                        opacity: tileMouse.containsMouse ? 0.08 : 0
-                        Behavior on opacity { NumberAnimation { duration: Style.duration(120); easing.type: Easing.OutCubic } }
+                    Row {
+                        visible: rowItem.modelData.type === "tiles"
+                        Repeater {
+                            model: rowItem.modelData.type === "tiles" ? rowItem.modelData.groups : []
+                            Tile {
+                                required property var modelData
+                                group: modelData
+                                width: grid.cellWidth
+                                height: grid.cellHeight
+                            }
+                        }
                     }
                 }
-                Item {
-                    id: thumbMask
-                    anchors.fill: thumb
-                    visible: false
-                    layer.enabled: true
-                    Rectangle { anchors.fill: parent; radius: 8 }
+            }
+            Rectangle {  // pinned hour header
+                objectName: "motionStickyHeader"
+                visible: grid.topLabel !== ""
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 30
+                color: Commons.Color.popups.background
+                MacText {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: grid.topLabel
+                    color: ui.secondaryLabel
+                    font.pixelSize: ui.callout
+                    font.weight: Font.DemiBold
+                    font.features: { "tnum": 1 }
                 }
-                MouseArea {
-                    id: tileMouse
-                    anchors.fill: thumb
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.selectedIndex = tile.index
-                        root.forceActiveFocus()
-                    }
+            }
+            Rectangle {  // the list continues below
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 28
+                visible: grid.contentY + grid.height < grid.contentHeight - 2
+                gradient: Gradient {
+                    GradientStop { position: 0; color: "transparent" }
+                    GradientStop { position: 1; color: Commons.Color.popups.background }
                 }
             }
         }
@@ -599,8 +556,7 @@ FocusScope {
         color: Qt.rgba(0, 0, 0, 0.9)
         radius: 12
         z: 10
-        readonly property var item: root.selectedIndex >= 0 && root.selectedIndex < root.visibleItems.length
-            ? root.visibleItems[root.selectedIndex] : null
+        readonly property var item: root.previewItem
         opacity: visible ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: Style.duration(160); easing.type: Easing.OutCubic } }
 
@@ -615,11 +571,17 @@ FocusScope {
             anchors.rightMargin: 56
             anchors.topMargin: 48
             anchors.bottomMargin: 64
-            visible: root.clipState !== "ready"
             source: root.selectedSource
             fillMode: Image.PreserveAspectFit
             asynchronous: true
             cache: false
+            MouseArea {  // clicking the still opens its moment in Recordings
+                anchors.centerIn: parent
+                width: stillImage.paintedWidth
+                height: stillImage.paintedHeight
+                cursorShape: root.clipAvailable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.clipAvailable ? root.openPreviewInRecordings() : (root.selectedIndex = -1)
+            }
         }
         MacText {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -633,193 +595,72 @@ FocusScope {
             font.weight: Font.DemiBold
             font.features: { "tnum": 1 }
         }
-        // The clip plays where the still was; clicking the video toggles playback.
-        Item {
-            id: clipView
-            objectName: "clipView"
-            anchors.fill: stillImage
-            visible: root.clipState === "ready"
-            MediaPlayer {
-                id: clipPlayer
-                objectName: "clipPlayer"
-                source: root.clipState === "ready" && root.clipPath !== ""
-                    ? "file://" + root.clipPath.split("/").map(encodeURIComponent).join("/") : ""
-                videoOutput: clipVideo
-                audioOutput: AudioOutput {}
-                onSourceChanged: if (source.toString() !== "") play()
-                onErrorOccurred: {
-                    if (root.clipState !== "ready") return
-                    root.clipError = "empty"  // unreadable file; a retry refetches it
-                    root.clipState = "error"
-                }
-            }
-            VideoOutput {
-                id: clipVideo
-                anchors.fill: parent
-                fillMode: VideoOutput.PreserveAspectFit
-            }
-            MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.toggleClip()
-            }
-            // A slow camera can leave a clip short; say so on the video itself.
-            Rectangle {
-                objectName: "clipPartialNote"
-                visible: root.clipPartial
-                x: Math.max(8, (parent.width - clipVideo.contentRect.width) / 2 + 8)
-                y: Math.max(8, (parent.height - clipVideo.contentRect.height) / 2 + 8)
-                width: Math.min(partialText.implicitWidth + 20, parent.width - 16)
-                height: 24
-                radius: height / 2
-                color: Qt.rgba(0, 0, 0, 0.6)
-                MacText {
-                    id: partialText
-                    anchors.centerIn: parent
-                    width: Math.min(implicitWidth, parent.width - 20)
-                    text: strings.t("clip.partial")
-                    color: ui.systemOrange
-                    font.pixelSize: ui.caption
-                    font.weight: Font.DemiBold
-                }
-            }
-        }
 
-        // Bottom bar: "Play clip", download progress, an error, or player controls.
+        // Actions: watch this moment in Recordings, or keep a copy of the clip.
         Rectangle {
-            id: clipBar
+            id: actionBar
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 14
-            // Controls span the viewer (the seek bar takes the free space); other states hug their content.
-            width: root.clipState === "ready" ? Math.min(parent.width - 32, 640)
-                : Math.min(parent.width - 32, clipRow.implicitWidth + 24)
+            width: Math.min(parent.width - 32, actionRow.implicitWidth + 16)
             height: 40
             radius: height / 2
-            visible: root.clipState !== "" || root.clipAvailable
-            color: root.clipState === "" ? "transparent" : Qt.rgba(0.12, 0.12, 0.13, 0.82)
-            border.width: root.clipState === "" ? 0 : 1
-            border.color: Qt.rgba(1, 1, 1, 0.12)
+            visible: root.clipAvailable
+            color: root.saveState === "" ? "transparent" : Qt.rgba(0.12, 0.12, 0.13, 0.82)
             MouseArea { anchors.fill: parent }  // keep clicks from closing the viewer
             RowLayout {
-                id: clipRow
-                anchors.fill: parent
-                anchors.leftMargin: 12
-                anchors.rightMargin: 12
-                spacing: 10
-
+                id: actionRow
+                anchors.centerIn: parent
+                spacing: 8
                 GlassPill {
-                    objectName: "clipPlayButton"
-                    visible: root.clipState === ""
+                    objectName: "openInRecordings"
                     glyph: ui.iconPlay
-                    text: strings.t("clip.play")
-                    onClicked: root.playClip()
+                    text: strings.t("motion.openInRecordings")
+                    primary: true
+                    onClicked: root.openPreviewInRecordings()
                 }
-
-                // Fetching
+                GlassPill {
+                    objectName: "saveClip"
+                    visible: root.saveState === ""
+                    glyph: ui.iconDownload
+                    text: strings.t("motion.saveClip")
+                    onClicked: root.startSave()
+                }
                 Text {
-                    visible: root.clipState === "fetching"
+                    visible: root.saveState === "fetching" || root.saveState === "saving"
                     textFormat: Text.PlainText
                     text: ui.iconLoading
                     font.family: ui.iconFont
-                    font.pixelSize: 16
+                    font.pixelSize: 15
                     color: "white"
                     RotationAnimator on rotation {
                         from: 0; to: 360; duration: 1000; loops: Animation.Infinite
-                        running: root.clipState === "fetching" && root.visible
+                        running: (root.saveState === "fetching" || root.saveState === "saving") && root.visible
                     }
                 }
                 MacText {
-                    objectName: "clipFetchingLabel"
-                    visible: root.clipState === "fetching"
-                    Layout.fillWidth: true
-                    text: strings.t("clip.fetching") + (root.clipProgress > 0 ? "  " + root.megabytes(root.clipProgress) : "")
+                    objectName: "saveClipStatus"
+                    visible: root.saveState !== ""
+                    text: root.saveState === "fetching" ? strings.t("motion.savingClip")
+                            + (root.saveProgress > 0 ? "  " + root.megabytes(root.saveProgress) : "")
+                        : root.saveState === "saving" ? strings.t("motion.savingClip")
+                        : root.saveState === "saved" ? strings.t("clip.saved")
+                        : root.clipErrorText(root.saveError)
                     color: "white"
                     font.pixelSize: ui.callout
                     font.features: { "tnum": 1 }
                 }
                 GlassPill {
-                    objectName: "clipCancel"
-                    visible: root.clipState === "fetching"
+                    objectName: "saveClipCancel"
+                    visible: root.saveState === "fetching"
                     text: strings.t("clip.cancel")
-                    onClicked: root.closeClip()
-                }
-
-                // Error
-                MacText {
-                    objectName: "clipErrorMessage"
-                    visible: root.clipState === "error"
-                    Layout.fillWidth: true
-                    text: root.clipState === "error" ? root.clipErrorText(root.clipError) : ""
-                    color: "white"
-                    font.pixelSize: ui.callout
+                    onClicked: root.cancelSave()
                 }
                 GlassPill {
-                    objectName: "clipRetry"
-                    visible: root.clipState === "error" && root.clipRetryable
+                    objectName: "saveClipRetry"
+                    visible: root.saveState === "error" && root.saveRetryable
                     text: strings.t("clip.retry")
-                    onClicked: root.playClip()
-                }
-
-                // Player
-                GlassButton {
-                    objectName: "clipToggle"
-                    visible: root.clipState === "ready"
-                    implicitWidth: 28
-                    implicitHeight: 28
-                    text: clipPlayer.playbackState === MediaPlayer.PlayingState ? ui.iconPause
-                        : clipPlayer.mediaStatus === MediaPlayer.EndOfMedia ? ui.iconReplay : ui.iconPlay
-                    tipText: clipPlayer.playbackState === MediaPlayer.PlayingState ? strings.t("clip.pause") : strings.t("clip.resume")
-                    onClicked: root.toggleClip()
-                }
-                MacText {
-                    visible: root.clipState === "ready"
-                    text: root.clock(clipPlayer.position)
-                    color: "white"
-                    font.pixelSize: ui.caption
-                    font.features: { "tnum": 1 }
-                }
-                MacSlider {
-                    id: clipSeek
-                    objectName: "clipSeek"
-                    visible: root.clipState === "ready"
-                    Layout.fillWidth: true
-                    Layout.minimumWidth: 60
-                    focusPolicy: Qt.NoFocus
-                    from: 0
-                    to: Math.max(1, clipPlayer.duration)
-                    onMoved: clipPlayer.setPosition(value)
-                    Binding on value {
-                        when: !clipSeek.pressed
-                        value: clipPlayer.position
-                    }
-                }
-                MacText {
-                    visible: root.clipState === "ready"
-                    text: root.clock(clipPlayer.duration)
-                    color: Qt.rgba(1, 1, 1, 0.7)
-                    font.pixelSize: ui.caption
-                    font.features: { "tnum": 1 }
-                }
-                GlassButton {
-                    objectName: "clipSave"
-                    visible: root.clipState === "ready"
-                    implicitWidth: 28
-                    implicitHeight: 28
-                    enabled: root.saveState !== "saving"
-                    text: root.saveState === "saved" ? ui.iconCheck : ui.iconDownload
-                    tipText: root.saveState === "saved" ? strings.t("clip.saved")
-                        : root.saveState === "error" ? strings.t("clip.saveFailed") : strings.t("clip.save")
-                    onClicked: root.saveClip()
-                }
-                GlassButton {
-                    objectName: "clipShowStill"
-                    visible: root.clipState === "ready"
-                    implicitWidth: 28
-                    implicitHeight: 28
-                    text: ui.iconImage
-                    tipText: strings.t("clip.showStill")
-                    onClicked: root.closeClip()
+                    onClicked: root.startSave()
                 }
             }
         }
@@ -852,10 +693,127 @@ FocusScope {
         }
     }
 
+    // One event: its newest still, its time, its camera, and ×N for a burst.
+    component Tile: Item {
+        id: tile
+        property var group: ({first: 0, count: 1})
+        readonly property var still: root.visibleItems[group.first] || ({})
+        Item {
+            id: thumb
+            anchors.fill: parent
+            anchors.margins: 4
+            layer.enabled: true
+            layer.effect: MultiEffect {
+                maskEnabled: true
+                maskSource: thumbMask
+                maskThresholdMin: 0.5
+                maskSpreadAtMin: 1.0
+            }
+            Rectangle { anchors.fill: parent; color: "#0e0e10" }
+            Image {
+                anchors.fill: parent
+                source: tile.still.path ? "file://" + tile.still.path : ""
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                cache: false
+                sourceSize.width: 380
+                sourceSize.height: 240
+            }
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Math.min(parent.height * 0.5, 44)
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0) }
+                    GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0.62) }
+                }
+            }
+            Text {
+                objectName: "stillCameraName"
+                visible: root.showCameraNames
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.rightMargin: 8
+                anchors.bottomMargin: 6
+                width: Math.min(implicitWidth, parent.width * 0.45)
+                textFormat: Text.PlainText
+                text: root.cameraLabel(tile.still)
+                font.family: ui.font
+                font.pixelSize: ui.caption
+                font.weight: Font.Medium
+                color: Qt.rgba(1, 1, 1, 0.8)
+                elide: Text.ElideRight
+                horizontalAlignment: Text.AlignRight
+            }
+            Text {
+                anchors.left: parent.left
+                anchors.bottom: parent.bottom
+                anchors.leftMargin: 8
+                anchors.bottomMargin: 6
+                width: parent.width * (root.showCameraNames ? 0.5 : 1) - 16
+                textFormat: Text.PlainText
+                text: (tile.still.date && tile.still.date !== root.today
+                    ? root.dayLabel(tile.still) + " · " : "") + (tile.still.time || tile.still.name || "")
+                font.family: ui.font
+                font.pixelSize: ui.caption
+                font.weight: Font.DemiBold
+                font.features: { "tnum": 1 }
+                color: "white"
+                elide: Text.ElideRight
+            }
+            Rectangle {
+                objectName: "burstBadge"
+                visible: tile.group.count > 1
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 6
+                width: badgeText.implicitWidth + 12
+                height: 20
+                radius: height / 2
+                color: Qt.rgba(0, 0, 0, 0.6)
+                Text {
+                    id: badgeText
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: "×" + tile.group.count
+                    font.family: ui.font
+                    font.pixelSize: ui.caption
+                    font.weight: Font.DemiBold
+                    color: "white"
+                }
+            }
+            Rectangle {
+                anchors.fill: parent
+                color: "white"
+                opacity: tileMouse.containsMouse ? 0.08 : 0
+                Behavior on opacity { NumberAnimation { duration: Style.duration(120); easing.type: Easing.OutCubic } }
+            }
+        }
+        Item {
+            id: thumbMask
+            anchors.fill: thumb
+            visible: false
+            layer.enabled: true
+            Rectangle { anchors.fill: parent; radius: 10 }
+        }
+        MouseArea {
+            id: tileMouse
+            anchors.fill: thumb
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                root.selectedIndex = tile.group.first
+                root.forceActiveFocus()
+            }
+        }
+    }
+
     // Text (optionally with an icon) on a translucent capsule, for the dark viewer.
     component GlassPill: Controls.Button {
         id: glassPill
         property string glyph: ""
+        property bool primary: false
         implicitHeight: 30
         leftPadding: 14
         rightPadding: 14
@@ -872,7 +830,7 @@ FocusScope {
                 text: glassPill.glyph
                 font.family: ui.iconFont
                 font.pixelSize: 15
-                color: "white"
+                color: glassPill.primary ? "#1c1c1e" : "white"
             }
             Text {
                 anchors.verticalCenter: parent.verticalCenter
@@ -881,14 +839,15 @@ FocusScope {
                 font.family: ui.font
                 font.pixelSize: ui.callout
                 font.weight: Font.DemiBold
-                color: "white"
+                color: glassPill.primary ? "#1c1c1e" : "white"
             }
         }
         background: Rectangle {
             radius: height / 2
-            color: glassPill.down ? Qt.rgba(1, 1, 1, 0.3) : glassPill.hovered ? Qt.rgba(1, 1, 1, 0.24) : Qt.rgba(1, 1, 1, 0.16)
-            border.width: glassPill.visualFocus ? 2 : 1
-            border.color: glassPill.visualFocus ? ui.alpha(ui.accent, 0.9) : Qt.rgba(1, 1, 1, 0.16)
+            color: glassPill.primary ? (glassPill.down ? Qt.rgba(1, 1, 1, 0.75) : glassPill.hovered ? Qt.rgba(1, 1, 1, 0.95) : Qt.rgba(1, 1, 1, 0.88))
+                : glassPill.down ? Qt.rgba(1, 1, 1, 0.3) : glassPill.hovered ? Qt.rgba(1, 1, 1, 0.24) : Qt.rgba(1, 1, 1, 0.16)
+            border.width: glassPill.visualFocus ? 2 : 0
+            border.color: ui.alpha(ui.accent, 0.9)
         }
         PointerArea { visible: glassPill.enabled }
     }
