@@ -39,6 +39,23 @@ Settings live in `$XDG_CONFIG_HOME/rtsp-camera/` (typically
 the save helper over stdin, never on the command line. RTSP is not encrypted —
 prefer RTSps if your camera supports it.
 
+**Keep passwords out of the journal:** the shell's FFmpeg backend logs the
+full stream URL (`Input #0, rtsp, from 'rtsp://user:pass@…'`, and XM-style
+`user=…&password=…` paths) to the shell's journal. To avoid that, relay the
+camera through a local [go2rtc](https://github.com/AlexxIT/go2rtc) bound to
+loopback: put the real URL in its config as a plain stream (no `ffmpeg:`, so
+nothing is transcoded) and point the plugin at
+`rtsp://127.0.0.1:8554/<stream>` with empty user/password. `motiond.py`
+follows the relay to the real camera for motion events.
+
+```json
+{"rtsp": {"listen": "127.0.0.1:8554"}, "api": {"listen": ""}, "webrtc": {"listen": ""},
+ "streams": {"camera1": "rtsp://<user>:<pass>@192.0.2.10:554/stream"}}
+```
+
+Keep that file mode 0600 (`go2rtc.private.json` in this folder is what
+`motiond.py` reads).
+
 ---
 
 ## Design
