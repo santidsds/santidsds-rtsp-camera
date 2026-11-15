@@ -44,6 +44,9 @@ FocusScope {
     property real startPosition: 0    // player position (ms) when its first frame played
     property real pausedAt: 0
     property real hourOverride: -1
+    property real lastStart: 0        // when a helper last started (each start is a camera login)
+    property bool chaining: false     // the current session continues the previous one
+    property real indexLoadedAt: 0
     property real speed: 1
     readonly property var speeds: [1, 1.5, 2, 4]
     readonly property real dayLength: 86400
@@ -109,21 +112,27 @@ FocusScope {
         ranges = pairs(result.ranges)
         motion = pairs(result.motion)
         indexFor = cameraId
+        indexLoadedAt = Date.now()
         indexState = "ready"
     }
 
     // --- playback ----------------------------------------------------------------
-    function requestPlay(at) {
+    function requestPlay(at, continuing) {
         if (!day || indexState !== "ready") return
         cursor = Math.max(0, Math.min(dayLength - 1, at))
         hourOverride = -1
+        chaining = continuing === true
         playState = "connecting"
         playError = ""
+        // Every start is a login on the camera: keep them at least 1.5 s apart.
+        debounce.interval = Math.max(250, 1500 - (Date.now() - lastStart))
         debounce.restart()
     }
     function startSession() {
         player.stop()
         playUrl = ""
+        playState = "connecting"
+        playError = ""
         if (streamer.running) {
             pendingAt = cursor
             streamer.running = false   // the helper tells the camera to stop, then exits
@@ -132,6 +141,7 @@ FocusScope {
         pendingAt = -1
         sessionStart = cursor
         sessionEnd = -1
+        lastStart = Date.now()
         streamer.gotUrl = false
         streamer.command = ["python3", helper, "--play", "--camera", cameraId, "--at", day + " " + clock(cursor)]
         streamer.running = true
@@ -149,6 +159,8 @@ FocusScope {
             player.pause()
             pausedAt = Date.now()
             playState = "paused"
+        } else if (playState === "connecting") {
+            stopPlayback()  // changed your mind while it loads
         } else if (playState === "paused") {
             // A long pause ends the camera's session; start again where we were.
             if (Date.now() - pausedAt > 90000 || !streamer.running) requestPlay(position)
@@ -174,7 +186,8 @@ FocusScope {
     function handleStreamLine(line) {
         var message
         try { message = JSON.parse(line) } catch (error) { return }
-        if (!message || typeof message !== "object" || pendingAt >= 0) return
+        // Lines from a session being replaced (or about to be) don't count.
+        if (!message || typeof message !== "object" || pendingAt >= 0 || debounce.running) return
         if (typeof message.url === "string" && /^http:\/\/127\.0\.0\.1:\d+\//.test(message.url)) {
             streamer.gotUrl = true
             var start = String(message.start || "").split(" ")
@@ -190,9 +203,15 @@ FocusScope {
             if (first[0] === day) sessionStart = seconds(first[1])
             return
         }
-        if (message.ok === false && (playState === "connecting" || playState === "playing")) {
-            playError = String(message.error || "failed")
-            playState = "error"
+        if (message.ok === false && message.error !== "cancelled"
+                && (playState === "connecting" || playState === "playing")) {
+            // Running into the end of what's recorded while continuing is just the end.
+            if (chaining && message.error === "no-recording") {
+                playState = "ended"
+            } else {
+                playError = String(message.error || "failed")
+                playState = "error"
+            }
             player.stop()
         }
     }
@@ -201,6 +220,8 @@ FocusScope {
         if (!active) { stopPlayback(); playState = ""; return }
         forceActiveFocus()
         if (cameraId && (indexFor !== cameraId || indexState === "error")) loadIndex("")
+        else if (day === Qt.formatDate(new Date(), "yyyy-MM-dd") && Date.now() - indexLoadedAt > 60000)
+            loadIndex(day)  // today keeps recording: refresh on the way back in
     }
     onCameraIdChanged: {
         stopPlayback()
@@ -268,10 +289,24 @@ FocusScope {
             }
         }
         onMediaStatusChanged: {
+            if (mediaStatus === MediaPlayer.EndOfMedia && root.playState === "connecting") {
+                root.playError = "failed"  // the stream ended before anything played
+                root.playState = "error"
+                return
+            }
             if (mediaStatus !== MediaPlayer.EndOfMedia || root.playState !== "playing") return
-            // A session covers up to 30 minutes; carry on with the next one until the day ends.
-            if (root.sessionEnd >= 0 && root.sessionEnd < root.dayLength - 2) root.requestPlay(root.sessionEnd)
-            else { root.cursor = root.position; root.playState = "ended" }
+            var reached = root.position
+            root.cursor = reached
+            if (root.sessionEnd >= 0 && reached < root.sessionEnd - 5) {
+                // Ended early (the camera stopped sending): carry on from here, once.
+                if (root.chaining && reached - root.sessionStart < 10) { root.playError = "timeout"; root.playState = "error" }
+                else root.requestPlay(reached, true)
+            } else if (root.sessionEnd >= 0 && root.sessionEnd < root.dayLength - 2) {
+                // A session covers one stretch of recording (up to 30 min); go on to the next.
+                root.requestPlay(root.sessionEnd + 1, true)
+            } else {
+                root.playState = "ended"
+            }
         }
         onErrorOccurred: {
             if (root.playState !== "connecting" && root.playState !== "playing") return

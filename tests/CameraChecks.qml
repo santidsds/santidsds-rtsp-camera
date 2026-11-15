@@ -175,7 +175,7 @@ ShellRoot {
             mouseClick(field("motionButton"))
             assertOk(panel.showingMotion && !state().streaming, "Motion segment opens the gallery and pauses video")
             equal(modes.currentIndex, 1, "Motion segment shows as selected")
-            assertOk(!field("fullscreenToolbarButton").visible, "full screen button hides outside live view")
+            assertOk(field("fullscreenToolbarButton").visible, "full screen button stays on the Motion tab")
             mouseClick(field("liveButton"))
             assertOk(!panel.showingMotion, "Live segment returns to video")
             eventually(function() { return state().live }, 5000)
