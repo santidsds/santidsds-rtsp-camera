@@ -77,6 +77,11 @@ QtObject {
     readonly property string iconReplay: String.fromCodePoint(0xF0459)
     readonly property string iconDownload: String.fromCodePoint(0xF01DA)
     readonly property string iconImage: String.fromCodePoint(0xF02E9)
+    readonly property string iconHistory: String.fromCodePoint(0xF02DA)
+    readonly property string iconSkipPrevious: String.fromCodePoint(0xF04AE)
+    readonly property string iconSkipNext: String.fromCodePoint(0xF04AD)
+    readonly property string iconBack: String.fromCodePoint(0xF013D)
+    readonly property string iconForward: String.fromCodePoint(0xF013E)
 
     function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
     function luminance(color) { return 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b }
