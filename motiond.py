@@ -16,6 +16,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import html
 import json
@@ -644,6 +645,23 @@ def alarm_is_motion_start(message: dict) -> bool:
     return status == "start" and any(word in event for word in ("motion", "human", "pir"))
 
 
+# Login result codes reported by XMeye firmware.
+DVRIP_LOGIN_CODES = {
+    106: "wrong user name or password",
+    203: "wrong password",
+    205: "account locked after too many attempts",
+    206: "account blocked",
+    207: "account already logged in elsewhere",
+}
+
+
+class DvripLoginError(PermissionError):
+    def __init__(self, code):
+        self.code = code
+        self.reason = DVRIP_LOGIN_CODES.get(code, "login refused")
+        super().__init__(f"DVRIP login refused ({code}: {self.reason})")
+
+
 class DvripClient:
     """Minimal DVRIP session: login, alarm guard, keepalive and JPEG snapshot."""
 
@@ -667,7 +685,7 @@ class DvripClient:
                                 "PassWord": sofia_hash(self.password), "UserName": self.user})
         _, reply = self.recv_reply(DVRIP_LOGIN + 1)
         if reply.get("Ret") not in (100, 515):
-            raise PermissionError("DVRIP login refused")
+            raise DvripLoginError(reply.get("Ret"))
         self.session = int(str(reply.get("SessionID", "0")), 16)
         try:
             self.alive_interval = max(5, int(reply.get("AliveInterval") or 20))
@@ -742,6 +760,77 @@ class DvripClient:
             if image[:1] == b"{":
                 raise RuntimeError("DVRIP snapshot refused")
         raise RuntimeError("DVRIP snapshot incomplete")
+
+
+# Device ("app") accounts for cameras whose DVRIP login differs from their stream URL.
+LOGINS_FILE = "dvrip-logins.json"
+
+
+def find_camera_ref(library, ref: str):
+    """A saved camera by id or by name (case-insensitive)."""
+    cameras = [c for c in (library.get("cameras") or []) if isinstance(c, dict)]
+    for camera in cameras:
+        if camera.get("id") == ref:
+            return camera
+    for camera in cameras:
+        if str(camera.get("name", "")).strip().lower() == ref.strip().lower():
+            return camera
+    return None
+
+
+def dvrip_login_for(config_dir: Path, camera: dict) -> dict | None:
+    """DVRIP host and account for a camera: its bridge source, or a saved device login."""
+    source = motion_source(config_dir, camera)
+    if source["kind"] == "dvrip":
+        return {key: source[key] for key in ("host", "port", "user", "password")}
+    host = urlsplit(camera.get("url") or "").hostname or ""
+    logins = load_json(config_dir / LOGINS_FILE, {})
+    saved = logins.get(camera.get("id")) if isinstance(logins, dict) else None
+    if not isinstance(saved, dict) or not host or host in LOOPBACK_HOSTS:
+        return None
+    return {"host": host, "port": int(saved.get("port") or DVRIP_PORT),
+            "user": str(saved.get("user") or ""), "password": str(saved.get("password") or "")}
+
+
+def cmd_set_login(config_dir: Path, ref: str, ask=input, ask_secret=getpass.getpass, client_class=None) -> int:
+    """Prompt for a camera's device login, try it once, and save it (0600) only if it works."""
+    client_class = client_class or DvripClient
+    library = load_json(config_dir / "config.json", {"cameras": []})
+    camera = find_camera_ref(library if isinstance(library, dict) else {}, ref)
+    if not camera:
+        names = ", ".join(str(c.get("name")) for c in library.get("cameras") or [] if isinstance(c, dict))
+        print(f"No saved camera called {ref!r}. Cameras: {names}")
+        return 2
+    if motion_source(config_dir, camera)["kind"] == "dvrip":
+        print(f"{camera.get('name')} already uses the login from the local bridge; nothing to do.")
+        return 0
+    host = urlsplit(camera.get("url") or "").hostname or ""
+    if not host or host in LOOPBACK_HOSTS:
+        print(f"{camera.get('name')} has no reachable host in its URL.")
+        return 2
+    print(f"Device login for {camera.get('name')} ({host}:{DVRIP_PORT}), the account used in the phone app.")
+    print("It is tried once; failed tries count toward the camera's lockout.")
+    user = ask("User [admin]: ").strip() or "admin"
+    password = ask_secret("Password (hidden): ")
+    client = client_class(host, DVRIP_PORT, user, password)
+    try:
+        client.connect()
+    except DvripLoginError as error:
+        print(f"Login refused: {error.reason} (code {error.code}). Nothing saved.")
+        return 1
+    except OSError as error:
+        print(f"Could not reach {host}:{DVRIP_PORT} ({error.__class__.__name__}). Nothing saved.")
+        return 1
+    finally:
+        client.close()
+    path = config_dir / LOGINS_FILE
+    logins = load_json(path, {})
+    if not isinstance(logins, dict):
+        logins = {}
+    logins[camera["id"]] = {"user": user, "password": password}
+    _write_private_json(path, logins)
+    print(f"Login OK. Saved for {camera.get('name')} in {path} (readable only by you).")
+    return 0
 
 
 def retention_settings(cfg: dict) -> tuple[int, int, int]:
@@ -1043,6 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="capture one snapshot now")
     parser.add_argument("--camera", default="", help="camera id for --once")
     parser.add_argument("--prune-only", action="store_true", help="apply retention and exit")
+    parser.add_argument("--set-login", metavar="CAMERA", help="prompt for a camera's device (app) login and save it")
     args = parser.parse_args(argv)
     config_dir, motion_dir = base_dirs()
     ensure_dirs(motion_dir)
@@ -1052,6 +1142,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(config_dir, motion_dir)
     if args.once:
         return cmd_once(config_dir, motion_dir, args.camera)
+    if args.set_login:
+        return cmd_set_login(config_dir, args.set_login)
     if args.prune_only:
         return cmd_prune(config_dir, motion_dir)
     return MotionSupervisor(config_dir, motion_dir).run()

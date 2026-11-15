@@ -294,5 +294,63 @@ class DvripTests(unittest.TestCase):
             self.assertEqual(status["cameras"]["cam2"].get("lastError"), "")
 
 
+class FakeLoginClient:
+    accept = True
+    tried = []
+
+    def __init__(self, host, port, user, password):
+        FakeLoginClient.tried.append((host, port, user, password))
+
+    def connect(self):
+        if not FakeLoginClient.accept:
+            raise motiond.DvripLoginError(203)
+
+    def close(self):
+        pass
+
+
+class SetLoginTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = Path(self.tmp.name)
+        _write(self.config / "config.json", {"version": 2, "selectedId": "c1", "cameras": [
+            {"id": "c1", "name": "Camera 1", "url": "rtsp://192.0.2.2:554/s", "username": "", "password": ""},
+            {"id": "c2", "name": "Camera 2", "url": "rtsp://127.0.0.1:8554/icsee_plugin", "username": "", "password": ""}]})
+        _write(self.config / motiond.BRIDGE_CONFIG, BRIDGE)
+        FakeLoginClient.tried = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_set(self, ref, accept=True, user=""):
+        FakeLoginClient.accept = accept
+        return motiond.cmd_set_login(self.config, ref, ask=lambda _: user, ask_secret=lambda _: "s3cret",
+                                     client_class=FakeLoginClient)
+
+    def test_success_saves_private_login_and_tries_once(self):
+        self.assertEqual(self.run_set("camera 1"), 0)
+        self.assertEqual(FakeLoginClient.tried, [("192.0.2.2", 34567, "admin", "s3cret")])
+        path = self.config / motiond.LOGINS_FILE
+        self.assertEqual(json.loads(path.read_text()), {"c1": {"user": "admin", "password": "s3cret"}})
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        login = motiond.dvrip_login_for(self.config, {"id": "c1", "url": "rtsp://192.0.2.2:554/s"})
+        self.assertEqual((login["host"], login["user"]), ("192.0.2.2", "admin"))
+
+    def test_refused_login_saves_nothing(self):
+        self.assertEqual(self.run_set("Camera 1", accept=False), 1)
+        self.assertEqual(len(FakeLoginClient.tried), 1)
+        self.assertFalse((self.config / motiond.LOGINS_FILE).exists())
+
+    def test_bridge_camera_needs_no_login(self):
+        self.assertEqual(self.run_set("c2"), 0)
+        self.assertEqual(FakeLoginClient.tried, [])
+        login = motiond.dvrip_login_for(self.config, {"id": "c2", "url": "rtsp://127.0.0.1:8554/icsee_plugin"})
+        self.assertEqual(login["host"], "192.0.2.3")
+
+    def test_unknown_camera(self):
+        self.assertEqual(self.run_set("garage"), 2)
+        self.assertEqual(FakeLoginClient.tried, [])
+
+
 if __name__ == "__main__":
     unittest.main()

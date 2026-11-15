@@ -11,3 +11,4 @@ position-*.json
 .profiles.lock
 .status.json
 *.log
+dvrip-logins.json
