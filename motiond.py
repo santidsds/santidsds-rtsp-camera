@@ -37,6 +37,9 @@ DEFAULT_MIN_INTERVAL_SEC = 5
 SNAPSHOT_RETRY = 2
 PRUNE_EVERY_SEC = 300
 IDLE_POLL_SEC = 15
+# Some firmwares ignore the PullMessages Timeout and answer instantly; pace the loop.
+MIN_PULL_PERIOD_SEC = 1.0
+CONFIG_CHECK_SEC = 10
 
 _STOP = False
 
@@ -347,26 +350,29 @@ def unsubscribe(sub_addr: str) -> None:
         pass
 
 
+_NOTIFICATION_RE = re.compile(
+    r"<(?:[^:>]+:)?NotificationMessage\b.*?</(?:[^:>]+:)?NotificationMessage>", re.S | re.I
+)
+_TOPIC_RE = re.compile(r"<(?:[^:>]+:)?Topic\b[^>]*>(.*?)</(?:[^:>]+:)?Topic>", re.S | re.I)
+_DATA_RE = re.compile(r"<(?:[^:>]+:)?Data\b[^>]*>(.*?)</(?:[^:>]+:)?Data>", re.S | re.I)
+_ITEM_RE = re.compile(
+    r"<(?:[^:>]+:)?SimpleItem\b[^>]*\bName=\"(IsMotion|State|Motion)\"[^>]*\bValue=\"([^\"]*)\"",
+    re.I,
+)
+
+
 def event_looks_like_motion(reply: str) -> bool:
-    lowered = reply.lower()
-    if "motion" not in lowered and "cellmotion" not in lowered and "tamper" not in lowered:
-        # Pull empty / unrelated — treat explicit true motion rules only
-        if "rule" not in lowered:
-            return False
-    # Heuristic: presence of motion topic or State true near motion
-    if re.search(r"cellmotion|tns1:RuleEngine/CellMotionDetector", lowered):
-        return True
-    if re.search(r"topic[^>]*motion", lowered):
-        return True
-    # Generic motion topic
-    if "motion" in lowered and (
-        "true" in lowered or "<tt:Data" in reply or "wsnt:Message" in reply
-    ):
-        # Avoid counting pure topic property dumps without messages
-        if "PullMessagesResponse" in reply or "wsnt:NotificationMessage" in reply:
-            return True
-    if "NotificationMessage" in reply and "motion" in lowered:
-        return True
+    """True only when a motion-topic notification carries an active (true) state."""
+    for note in _NOTIFICATION_RE.findall(reply):
+        topic = _TOPIC_RE.search(note)
+        if not topic or "motion" not in topic.group(1).lower():
+            continue
+        data = _DATA_RE.search(note)
+        if not data:
+            continue
+        for _, value in _ITEM_RE.findall(data.group(1)):
+            if value.strip().lower() in ("true", "1"):
+                return True
     return False
 
 
@@ -432,6 +438,26 @@ class MotionLoop:
         self.password = ""
         self.last_save = 0.0
         self.last_prune = 0.0
+        self.last_config_check = 0.0
+        self.config_stamp = None
+
+    def _config_stamp(self):
+        stamp = []
+        for name in ("config.json", "motion.json"):
+            try:
+                st = (self.config_dir / name).stat()
+                stamp.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                stamp.append(None)
+        return tuple(stamp)
+
+    def maybe_reload(self):
+        now = time.time()
+        if now - self.last_config_check < CONFIG_CHECK_SEC:
+            return
+        self.last_config_check = now
+        if self._config_stamp() != self.config_stamp:
+            self.reload()
 
     def reload(self):
         library = load_json(self.config_dir / "config.json", {"cameras": [], "selectedId": ""})
@@ -439,6 +465,7 @@ class MotionLoop:
             library = {"cameras": [], "selectedId": ""}
         self.library = library
         self.motion_cfg = ensure_motion_config(self.config_dir, library)
+        self.config_stamp = self._config_stamp()
         camera = find_camera(library, self.motion_cfg.get("cameraId") or "")
         if not camera:
             self.host = ""
@@ -544,14 +571,16 @@ class MotionLoop:
                     sub_addr, expires = create_pull_subscription(event_xaddr)
                     backoff = 2
                     write_status(self.motion_dir, listening=True, lastError="")
+                started = time.time()
                 reply = pull_messages(sub_addr, timeout_sec=PULL_TIMEOUT_SEC)
                 expires = time.time() + 110
                 if event_looks_like_motion(reply):
                     self.capture_snapshot("onvif")
                 self.maybe_prune()
-                # cheap config reload every few pulls handled by prune timer path
-                if int(now) % 60 < PULL_TIMEOUT_SEC:
-                    self.reload()
+                self.maybe_reload()
+                elapsed = time.time() - started
+                if elapsed < MIN_PULL_PERIOD_SEC:
+                    time.sleep(MIN_PULL_PERIOD_SEC - elapsed)
             except Exception as error:  # noqa: BLE001
                 write_status(
                     self.motion_dir,

@@ -83,5 +83,37 @@ class ListTests(unittest.TestCase):
             self.assertEqual([i["name"] for i in items], [b.name, a.name])
 
 
+def _note(topic, name, value, op="Changed"):
+    return (
+        "<wsnt:NotificationMessage><wsnt:Topic>" + topic + "</wsnt:Topic>"
+        '<wsnt:Message><tt:Message PropertyOperation="' + op + '"><tt:Data>'
+        '<tt:SimpleItem Name="' + name + '" Value="' + value + '" />'
+        "</tt:Data></tt:Message></wsnt:Message></wsnt:NotificationMessage>"
+    )
+
+
+class MotionEventTests(unittest.TestCase):
+    def wrap(self, *notes):
+        return "<tev:PullMessagesResponse>" + "".join(notes) + "</tev:PullMessagesResponse>"
+
+    def test_false_state_is_not_motion(self):
+        reply = self.wrap(
+            _note("tns1:RuleEngine/CellMotionDetector/Motion", "IsMotion", "false", "Initialized"),
+            _note("tns1:VideoSource/MotionAlarm", "State", "false"),
+        )
+        self.assertFalse(motiond.event_looks_like_motion(reply))
+
+    def test_true_motion(self):
+        reply = self.wrap(_note("tns1:RuleEngine/CellMotionDetector/Motion", "IsMotion", "true"))
+        self.assertTrue(motiond.event_looks_like_motion(reply))
+
+    def test_true_non_motion_topic_ignored(self):
+        reply = self.wrap(_note("tns1:Device/Trigger/DigitalInput", "LogicalState", "true"))
+        self.assertFalse(motiond.event_looks_like_motion(reply))
+
+    def test_empty(self):
+        self.assertFalse(motiond.event_looks_like_motion(self.wrap()))
+
+
 if __name__ == "__main__":
     unittest.main()

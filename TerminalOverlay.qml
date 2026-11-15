@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 Item {
     id: root
@@ -11,8 +12,8 @@ Item {
     property double framesReceived: 0
     property double sampledFrames: 0
     property int tick: 0
-    readonly property color ink: Color.accent
-    readonly property color cornerColor: live ? Color.accent : "#ff4545"
+    readonly property color ink: Commons.Color.accent
+    readonly property color cornerColor: live ? Commons.Color.accent : "#ff4545"
     readonly property int inset: Math.max(7, Math.min(12, width / 24))
     readonly property int contentInset: inset + 6
     property real scanProgress: 0
@@ -111,7 +112,7 @@ Item {
             visible: root.height >= 160
             width: Math.max(0, parent.width - 32 - root.rightHeaderSpace)
             text: (root.live ? "LINK UP" : "LINK LOST") + " / RX " + root.frameHex
-            color: root.live ? root.ink : Color.urgent
+            color: root.live ? root.ink : Commons.Color.urgent
             font.pixelSize: 9
         }
 
@@ -143,7 +144,7 @@ Item {
         y: root.height - height - root.inset - 12
         width: Math.max(0, Math.min(280, root.width - root.contentInset * 2 - 46))
         height: 59
-        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.39)
+        color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.39)
         Rectangle { width: 2; height: parent.height; color: root.ink }
         Column {
             x: 10; y: 7

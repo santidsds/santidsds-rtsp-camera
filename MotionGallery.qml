@@ -5,6 +5,7 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Grid of motion stills saved by motiond.py (last 24h). Local files only.
@@ -14,7 +15,7 @@ FocusScope {
     signal closed()
 
     readonly property string helper: Qt.resolvedUrl("motiond.py").toString().replace(/^file:\/\//, "")
-    readonly property color foreground: Color.foreground
+    readonly property color foreground: Commons.Color.foreground
     property var items: []
     property bool loading: false
     property string listError: ""
@@ -132,14 +133,14 @@ FocusScope {
                 background: Rectangle {
                     radius: height / 2
                     color: parent.hovered
-                        ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.10)
-                        : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                        ? Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.10)
+                        : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.06)
                     border.width: 1
-                    border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.55)
+                    border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.55)
                 }
                 contentItem: Text {
                     text: parent.text
-                    color: parent.hovered ? Color.accent : Color.popups.text
+                    color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                     font.pixelSize: Style.font.caption
                     font.weight: Font.DemiBold
                     horizontalAlignment: Text.AlignHCenter
@@ -180,14 +181,14 @@ FocusScope {
                 background: Rectangle {
                     radius: height / 2
                     color: parent.hovered
-                        ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28)
-                        : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                        ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.28)
+                        : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.06)
                     border.width: 1
-                    border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.55)
+                    border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.55)
                 }
                 contentItem: Text {
                     text: parent.text
-                    color: parent.hovered ? Color.accent : Color.popups.text
+                    color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                     font.pixelSize: Style.font.caption
                     font.weight: Font.DemiBold
                     horizontalAlignment: Text.AlignHCenter
@@ -256,7 +257,7 @@ FocusScope {
                                 height: parent.height - 24
                                 radius: 10
                                 color: "#080b10"
-                                border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.7)
+                                border.color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.7)
                                 border.width: 1
                                 clip: true
 
@@ -328,14 +329,14 @@ FocusScope {
             background: Rectangle {
                 radius: height / 2
                 color: parent.hovered
-                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.16)
-                    : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.10)
+                    ? Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.16)
+                    : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.10)
                 border.width: 1
-                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
             }
             contentItem: Text {
                 text: parent.text
-                color: parent.hovered ? Color.accent : Color.popups.text
+                color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                 font.pixelSize: Style.font.caption
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter

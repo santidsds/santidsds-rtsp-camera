@@ -36,6 +36,7 @@ BarWidget {
         function close(): void { root.close() }
         function toggle(): void { root.togglePanel() }
         function status(): string { return panel.playbackStatus() }
+        function toggleDualView(): void { panel.toggleDualView() }
         function toggleAudio(): void { panel.toggleAudio() }
         function resize(width: int, height: int): void { panel.resizeViewer(width, height) }
         function togglePin(): void { panel.pinned = !panel.pinned }

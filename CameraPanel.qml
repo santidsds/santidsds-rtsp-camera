@@ -2,16 +2,17 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
-import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 Panel {
     id: root
     moduleName: "yani.camera"
     manageIpc: false
+    Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
     property var anchorItem: null
     property var hostWidget: null
     property bool configuring: true
@@ -25,9 +26,9 @@ Panel {
     property bool deleteArmed: false
     readonly property int selectedCameraIndex: cameras.findIndex(function(camera) { return camera.id === root.selectedCameraId })
     property string message: ""
-    property string playbackMessage: ""
-    property bool receivedFrame: false
-    property double framesReceived: 0
+    property alias playbackMessage: primaryFeed.playbackMessage
+    property alias receivedFrame: primaryFeed.receivedFrame
+    property alias framesReceived: primaryFeed.framesReceived
     property real viewerWidth: 640
     property real viewerHeight: 500
     property bool sizeDirty: false
@@ -42,14 +43,36 @@ Panel {
     property bool editingAppearance: false
     readonly property var videoStyles: ["original", "theme", "pixel", "theme-pixel"]
     property var pendingPosition: null
-    property int retryAttempt: 0
-    property bool changingPlayback: false
+    property alias retryAttempt: primaryFeed.retryAttempt
     property var config: ({url: "rtsp://", username: "", password: ""})
-    readonly property color foreground: bar ? bar.foreground : Color.foreground
+    readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
     readonly property string configPath: (Quickshell.env("XDG_CONFIG_HOME") || Quickshell.env("HOME") + "/.config") + "/rtsp-camera/config.json"
     readonly property bool streaming: opened && !configuring && !showingMotion && configured
-    readonly property bool live: streaming && frameWatchdog.running
-        && player.playbackState === MediaPlayer.PlayingState
+    readonly property bool live: primaryFeed.live
+    property bool dualView: true
+    property string focusedCameraId: ""
+    readonly property bool dualActive: dualView && cameras.length > 1 && !focusedCameraId
+    readonly property var primaryCamera: focusedCameraId
+        ? cameras.find(function(camera) { return camera.id === root.focusedCameraId }) || config : config
+    readonly property var secondaryCamera: cameras.find(function(camera) { return camera.id !== root.primaryCamera.id }) || ({})
+    onFullscreenChanged: if (!fullscreen) focusedCameraId = ""
+
+    function toggleDualView() {
+        fullscreen = false
+        focusedCameraId = ""
+        dualView = !dualView
+    }
+    function enlargeCamera(id) {
+        if (dualActive) focusedCameraId = id
+        toggleFullscreen()
+    }
+    function play(resetRetry) { primaryFeed.play(resetRetry) }
+    function scheduleReconnect(reason) { primaryFeed.scheduleReconnect(reason) }
+    function toggleFeedAudio(feed) {
+        if (feed === primaryFeed) secondaryFeed.mute()
+        else primaryFeed.mute()
+        feed.toggleAudio()
+    }
 
     function openMotionGallery() {
         if (!configured) return
@@ -128,14 +151,12 @@ Panel {
         if ((data.cameras.length && !selected) || (!data.cameras.length && data.selectedId !== "")) throw new Error()
         var changed = selectedCameraId !== data.selectedId
             || (selected && (selected.url !== config.url || selected.username !== config.username || selected.password !== config.password))
-        var wasStreaming = streaming
         cameras = data.cameras
         selectedCameraId = data.selectedId
         config = selected || {url: "rtsp://", username: "", password: ""}
         configured = !!selected
         if (!opened || !configured) configuring = !configured
-        if (changed) cameraAudio.muted = true
-        if (changed && wasStreaming && streaming) play()
+        if (changed) primaryFeed.mute()
     }
     function runProfileOperation(operation) {
         if (writer.running) return
@@ -157,59 +178,19 @@ Panel {
         runProfileOperation({action: "save", camera: {id: editingCameraId, name: cameraName.text,
             url: address.text, username: username.text, password: password.text}})
     }
-    function streamUrl() {
-        var url = config.url
-        var split = url.indexOf("://") + 3
-        var auth = config.username ? encodeURIComponent(config.username) + ":" + encodeURIComponent(config.password) + "@" : ""
-        return url.slice(0, split) + auth + url.slice(split)
-    }
-    function play(resetRetry) {
-        if (!streaming) return
-        reconnectTimer.stop()
-        if (resetRetry !== false) retryAttempt = 0
-        frameWatchdog.stop()
-        connectionTimeout.stop()
-        changingPlayback = true
-        player.stop()
-        player.source = ""
-        receivedFrame = false
-        framesReceived = 0
-        playbackMessage = "Connecting…"
-        player.source = streamUrl()
-        changingPlayback = false
-        connectionTimeout.restart()
-        player.play()
-    }
-    function scheduleReconnect(reason) {
-        if (!streaming || changingPlayback || reconnectTimer.running) return
-        frameWatchdog.stop()
-        connectionTimeout.stop()
-        changingPlayback = true
-        player.stop()
-        player.source = ""
-        changingPlayback = false
-        reconnectTimer.interval = Math.min(30000, 2000 * Math.pow(2, retryAttempt))
-        retryAttempt = Math.min(retryAttempt + 1, 5)
-        playbackMessage = reason + " Retrying in " + reconnectTimer.interval / 1000 + "s…"
-        reconnectTimer.start()
-    }
     function playbackStatus() {
-        return JSON.stringify({streaming: streaming, live: live, receivedFrame: receivedFrame,
-            framesReceived: framesReceived, timeoutRunning: connectionTimeout.running,
-            playing: player.playbackState === MediaPlayer.PlayingState,
-            hasAudio: player.hasAudio, muted: cameraAudio.muted,
+        return JSON.stringify(Object.assign(primaryFeed.status(), {
             width: popup.contentWidth, height: popup.contentHeight,
             fullscreen: fullscreen,
             sizePending: sizeDirty || sizeWriter.running, sizeSaveError: sizeSaveError,
             pinned: pinned, inputWidth: popup.mask.width, inputHeight: popup.mask.height,
             x: popup.cardOrigin.x, y: popup.cardOrigin.y,
-            reconnectPending: reconnectTimer.running, retryAttempt: retryAttempt,
-            retryDelay: reconnectTimer.interval,
             positionPending: !!pendingPosition || positionWriter.running,
             positionSaveError: positionSaveError,
             cameraCount: cameras.length, selectedCameraId: selectedCameraId,
             showingMotion: showingMotion,
-            message: playbackMessage})
+            viewMode: dualActive ? "dual" : focusedCameraId ? "focus" : "single",
+            feeds: dualActive ? [primaryFeed.status(), secondaryFeed.status()] : [primaryFeed.status()]}))
     }
     function resizeViewer(width, height) {
         viewerWidth = Math.round(Math.min(popup.availableCardWidth, Math.max(420, width)))
@@ -223,26 +204,12 @@ Panel {
         sizeDirty = false
         sizeWriter.running = true
     }
-    function toggleAudio() {
-        if (streaming && player.hasAudio) cameraAudio.muted = !cameraAudio.muted
-    }
+    function toggleAudio() { toggleFeedAudio(primaryFeed) }
     function saveViewerPosition() {
         if (!pendingPosition || positionWriter.running) return
         positionWriter.pending = JSON.stringify(pendingPosition)
         pendingPosition = null
         positionWriter.running = true
-    }
-    onStreamingChanged: {
-        if (streaming) play()
-        else {
-            reconnectTimer.stop()
-            retryAttempt = 0
-            frameWatchdog.stop()
-            cameraAudio.muted = true
-            connectionTimeout.stop()
-            player.stop()
-            player.source = ""
-        }
     }
     onOpenedChanged: {
         if (!opened) {
@@ -427,66 +394,6 @@ Panel {
             configFile.reload()
         }
     }
-    MediaPlayer {
-        id: player
-        videoOutput: video
-        audioOutput: AudioOutput {
-            id: cameraAudio
-            muted: true
-            volume: 1.0
-        }
-        onErrorOccurred: {
-            root.scheduleReconnect("Unable to connect.")
-        }
-        onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.EndOfMedia) {
-                root.scheduleReconnect("Stream ended.")
-            }
-        }
-        onPlaybackStateChanged: {
-            if (playbackState !== MediaPlayer.PlayingState) {
-                frameWatchdog.stop()
-                if (root.receivedFrame) root.scheduleReconnect("Stream interrupted.")
-            }
-        }
-    }
-    Connections {
-        target: video.videoSink
-        function onVideoFrameChanged() {
-            // Live RTSP feeds can render indefinitely without BufferedMedia.
-            // A positive video size excludes the empty frame emitted on stop.
-            if (!root.streaming || player.playbackState !== MediaPlayer.PlayingState
-                || video.videoSink.videoSize.width <= 0 || video.videoSink.videoSize.height <= 0) return
-            root.framesReceived += 1
-            reconnectTimer.stop()
-            root.retryAttempt = 0
-            frameWatchdog.restart()
-            if (!root.receivedFrame) {
-                root.receivedFrame = true
-                connectionTimeout.stop()
-                root.playbackMessage = ""
-            }
-        }
-    }
-    Timer {
-        id: reconnectTimer
-        interval: 2000
-        onTriggered: root.play(false)
-    }
-    Timer {
-        id: frameWatchdog
-        interval: 5000
-        onTriggered: root.scheduleReconnect("Video stalled.")
-    }
-    Timer {
-        id: connectionTimeout
-        interval: 20000
-        onTriggered: {
-            if (!root.streaming || root.receivedFrame) return
-            root.scheduleReconnect("Connection timed out.")
-        }
-    }
-
     CameraPopup {
         id: popup
         anchorItem: root.anchorItem
@@ -592,8 +499,9 @@ Panel {
                             Accessible.name: "Select camera"
                             onActivated: function(index) { root.selectCamera(index) }
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: cameraSelector.displayText
-                                color: Color.popups.text
+                                color: Commons.Color.popups.text
                                 font.family: Style.font.family
                                 font.pixelSize: Style.font.caption
                                 verticalAlignment: Text.AlignVCenter
@@ -603,17 +511,17 @@ Panel {
                             }
                             background: Rectangle {
                                 radius: 10
-                                color: Color.popups.background
+                                color: Commons.Color.popups.background
                                 border.width: 1
                                 border.color: cameraSelector.activeFocus
-                                    ? Color.accent
-                                    : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                    ? Commons.Color.accent
+                                    : Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                             }
                             indicator: Text {
                                 x: cameraSelector.width - width - 10
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "\u2304"
-                                color: Color.popups.text
+                                color: Commons.Color.popups.text
                                 font.family: Style.font.family
                                 font.pixelSize: Style.font.caption
                             }
@@ -623,8 +531,9 @@ Panel {
                                 height: 36
                                 text: modelData.name
                                 contentItem: Text {
+                                    textFormat: Text.PlainText
                                     text: parent.text
-                                    color: parent.highlighted ? Style.hoverStateColor(Color.popups.text, Color.accent) : Color.popups.text
+                                    color: parent.highlighted ? Style.hoverStateColor(Commons.Color.popups.text, Commons.Color.accent) : Commons.Color.popups.text
                                     font.family: Style.font.family
                                     font.pixelSize: Style.font.body
                                     elide: Text.ElideRight
@@ -635,7 +544,7 @@ Panel {
                                 background: Rectangle {
                                     radius: 8
                                     color: parent.hovered || parent.highlighted
-                                        ? Style.hoverFillFor(Color.popups.text, Color.accent)
+                                        ? Style.hoverFillFor(Commons.Color.popups.text, Commons.Color.accent)
                                         : "transparent"
                                 }
                                 PointerArea {}
@@ -657,9 +566,9 @@ Panel {
                                 }
                                 background: Rectangle {
                                     radius: 12
-                                    color: Color.popups.background
+                                    color: Commons.Color.popups.background
                                     border.width: 1
-                                    border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.65)
+                                    border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.65)
                                 }
                             }
                             PointerArea {}
@@ -672,7 +581,7 @@ Panel {
                         }
                         Controls.Button {
                             objectName: "motionButton"
-                            text: root.showingMotion ? "Live" : "Motion"
+                            text: root.showingMotion ? "Live" : headerControls.width < 540 ? "▧" : "Motion"
                             leftPadding: 12
                             rightPadding: 12
                             topPadding: 7
@@ -690,14 +599,14 @@ Panel {
                             background: Rectangle {
                                 radius: height / 2
                                 color: parent.hovered
-                                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
-                                    : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                                    ? Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.12)
+                                    : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.06)
                                 border.width: 1
-                                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                             }
                             contentItem: Text {
                                 text: parent.text
-                                color: parent.hovered ? Color.accent : Color.popups.text
+                                color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                                 font.pixelSize: Style.font.caption
                                 font.weight: Font.DemiBold
                                 horizontalAlignment: Text.AlignHCenter
@@ -710,8 +619,45 @@ Panel {
                             PointerArea {}
                         }
                         Controls.Button {
+                            objectName: "dualViewButton"
+                            text: headerControls.width < 540 ? "◫" : strings.t("layout.dual")
+                            leftPadding: 12
+                            rightPadding: 12
+                            topPadding: 7
+                            bottomPadding: 7
+                            hoverEnabled: true
+                            visible: !root.configuring && !root.showingMotion
+                            enabled: root.cameras.length > 1
+                            checkable: true
+                            checked: root.dualView
+                            Accessible.name: strings.t("layout.twoCameras")
+                            PanelToolTip {
+                                visible: parent.hovered
+                                text: root.dualView ? strings.t("layout.showSingle") : strings.t("layout.showBoth")
+                                fontSize: Style.font.caption
+                            }
+                            background: Rectangle {
+                                radius: height / 2
+                                color: parent.hovered
+                                    ? Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.12)
+                                    : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.06)
+                                border.width: 1
+                                border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
+                            }
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.hovered || parent.checked ? Commons.Color.accent : Commons.Color.popups.text
+                                font.pixelSize: Style.font.caption
+                                font.weight: Font.DemiBold
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            onClicked: root.toggleDualView()
+                            PointerArea {}
+                        }
+                        Controls.Button {
                             objectName: "themeButton"
-                            text: "Themes"
+                            text: headerControls.width < 540 ? "◐" : "Themes"
                             leftPadding: 12
                             rightPadding: 12
                             topPadding: 7
@@ -727,14 +673,14 @@ Panel {
                             background: Rectangle {
                                 radius: height / 2
                                 color: parent.hovered
-                                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
-                                    : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                                    ? Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.12)
+                                    : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.06)
                                 border.width: 1
-                                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                             }
                             contentItem: Text {
                                 text: parent.text
-                                color: parent.hovered ? Color.accent : Color.popups.text
+                                color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                                 font.pixelSize: Style.font.caption
                                 font.weight: Font.DemiBold
                                 horizontalAlignment: Text.AlignHCenter
@@ -745,7 +691,7 @@ Panel {
                         }
                         Controls.Button {
                             objectName: "configButton"
-                            text: "Config"
+                            text: headerControls.width < 540 ? "⚙" : "Config"
                             leftPadding: 12
                             rightPadding: 12
                             topPadding: 7
@@ -761,14 +707,14 @@ Panel {
                             background: Rectangle {
                                 radius: height / 2
                                 color: parent.hovered
-                                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
-                                    : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                                    ? Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.12)
+                                    : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.06)
                                 border.width: 1
-                                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                             }
                             contentItem: Text {
                                 text: parent.text
-                                color: parent.hovered ? Color.accent : Color.popups.text
+                                color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                                 font.pixelSize: Style.font.caption
                                 font.weight: Font.DemiBold
                                 horizontalAlignment: Text.AlignHCenter
@@ -800,12 +746,12 @@ Panel {
                                 height: 24
                                 radius: height / 2
                                 color: pinSwitch.hovered
-                                    ? Style.hoverFillFor(Color.popups.text, Color.accent)
+                                    ? Style.hoverFillFor(Commons.Color.popups.text, Commons.Color.accent)
                                     : pinSwitch.checked
-                                        ? Style.selectedFillFor(Color.popups.text, Color.accent)
-                                        : Style.normalFillFor(Color.popups.text, Color.accent)
+                                        ? Style.selectedFillFor(Commons.Color.popups.text, Commons.Color.accent)
+                                        : Style.normalFillFor(Commons.Color.popups.text, Commons.Color.accent)
                                 border.width: pinSwitch.activeFocus ? 2 : 1
-                                border.color: pinSwitch.activeFocus ? Color.accent : Color.popups.border
+                                border.color: pinSwitch.activeFocus ? Commons.Color.accent : Commons.Color.popups.border
                                 Rectangle {
                                     x: pinSwitch.checked ? parent.width - width - 3 : 3
                                     y: 3
@@ -813,10 +759,10 @@ Panel {
                                     height: 18
                                     radius: height / 2
                                     color: pinSwitch.checked
-                                        ? Style.selectedStateColor(Color.popups.text, Color.accent)
-                                        : Qt.darker(Color.popups.text, 1.25)
+                                        ? Style.selectedStateColor(Commons.Color.popups.text, Commons.Color.accent)
+                                        : Qt.darker(Commons.Color.popups.text, 1.25)
                                     Behavior on x {
-                                        NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                                        NumberAnimation { duration: Style.duration(120); easing.type: Easing.OutCubic }
                                     }
                                 }
                             }
@@ -832,7 +778,7 @@ Panel {
                             Accessible.name: "Close camera"
                             contentItem: Text {
                                 text: parent.text
-                                color: parent.hovered ? Color.accent : Color.popups.text
+                                color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                                 font.family: Style.font.family
                                 font.pixelSize: Style.font.body
                                 horizontalAlignment: Text.AlignHCenter
@@ -841,10 +787,10 @@ Panel {
                             background: Rectangle {
                                 radius: height / 2
                                 color: parent.hovered
-                                    ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
+                                    ? Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.12)
                                     : "transparent"
                                 border.width: parent.hovered ? 1 : 0
-                                border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                             }
                             PointerArea {}
                             onClicked: root.close()
@@ -858,117 +804,51 @@ Panel {
                     ColumnLayout {
                         id: viewerPage
                         spacing: 8
-                        Rectangle {
+                        GridLayout {
+                            id: feedGrid
+                            objectName: "feedGrid"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            Layout.minimumHeight: 120
-                            color: "#080b10"
-                            border.width: 1
-                            border.color: Color.accent
-                            clip: true
-                            VideoOutput {
-                                id: video
-                                anchors.fill: parent
-                                anchors.margins: 1
-                                fillMode: VideoOutput.PreserveAspectFit
-                            }
-                            VideoEffect {
-                                objectName: "videoEffect"
-                                anchors.fill: video
-                                sourceItem: video
-                                active: root.streaming
-                                style: root.editingAppearance ? root.videoStyles[videoStyleChooser.currentIndex] : root.videoStyle
-                                strength: (root.editingAppearance ? tintSlider.value : root.tintStrength) / 100
+                            Layout.minimumHeight: root.dualActive && columns === 1 ? 240 : 120
+                            columns: root.dualActive && width >= 720 ? 2 : 1
+                            columnSpacing: 10
+                            rowSpacing: 10
+                            CameraFeed {
+                                id: primaryFeed
+                                objectName: "primaryFeed"
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                Layout.preferredWidth: 1
+                                Layout.preferredHeight: 1
+                                camera: root.primaryCamera
+                                streaming: root.streaming
+                                compact: root.dualActive
+                                fullscreen: root.fullscreen
+                                videoStyle: root.editingAppearance ? root.videoStyles[videoStyleChooser.currentIndex] : root.videoStyle
+                                tintStrength: root.editingAppearance ? tintSlider.value : root.tintStrength
                                 pixelSize: root.editingAppearance ? Math.round(pixelSlider.value) : root.pixelSize
+                                overlayStyle: root.editingAppearance ? root.overlayStyles[overlayChooser.currentIndex] : root.overlayStyle
+                                message: root.message || root.sizeSaveError || root.positionSaveError
+                                onAudioRequested: root.toggleFeedAudio(primaryFeed)
+                                onFullscreenRequested: root.enlargeCamera(camera.id || "")
                             }
-                            // Keep controls readable over both light and dark video.
-                            Rectangle {
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.bottom: parent.bottom
-                                anchors.margins: 1
-                                height: 88
-                                gradient: Gradient {
-                                    GradientStop { position: 0; color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0) }
-                                    GradientStop { position: 1; color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.75) }
-                                }
-                            }
-                            VideoOverlay {
-                                id: cameraOverlay
-                                objectName: "videoOverlay"
-                                x: video.x + (video.contentRect.width > 0 ? video.contentRect.x : 0)
-                                y: video.y + (video.contentRect.height > 0 ? video.contentRect.y : 0)
-                                width: video.contentRect.width > 0 ? video.contentRect.width : video.width
-                                height: video.contentRect.height > 0 ? video.contentRect.height : video.height
-                                active: root.streaming
-                                mode: root.editingAppearance ? root.overlayStyles[overlayChooser.currentIndex] : root.overlayStyle
-                                cameraName: root.selectedCameraIndex >= 0 ? root.cameras[root.selectedCameraIndex].name : "Camera"
-                                live: root.live
-                                framesReceived: root.framesReceived
-                                rightHeaderSpace: audioWaveform.width + 8
-                            }
-                            AudioWaveform {
-                                id: audioWaveform
-                                objectName: "audioButton"
-                                readonly property real videoWidth: cameraOverlay.width > 0 ? cameraOverlay.width : video.width
-                                x: (cameraOverlay.width > 0 ? cameraOverlay.x : video.x)
-                                    + videoWidth - feedControls.sideInset - width
-                                y: (cameraOverlay.height > 0 ? cameraOverlay.y : video.y) + feedControls.overlayInset + 8
-                                width: Math.min(104, Math.max(0, videoWidth - feedControls.sideInset * 2) * 0.3)
-                                audioAvailable: root.streaming && player.hasAudio
-                                audioMuted: cameraAudio.muted
-                                onClicked: root.toggleAudio()
-                            }
-                            Label {
-                                anchors.centerIn: parent
-                                width: parent.width - 48
-                                text: root.playbackMessage
-                                visible: text !== ""
-                                color: "white"
-                                font.family: Style.font.family
-                                font.pixelSize: Style.font.caption
-                                wrapMode: Text.WordWrap
-                                horizontalAlignment: Text.AlignHCenter
-                                padding: 12
-                                background: Rectangle { color: "#dd080b10"; radius: 8 }
-                            }
-                            Label {
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.bottom: feedControls.top
-                                anchors.leftMargin: 12
-                                anchors.rightMargin: 12
-                                anchors.bottomMargin: 6
-                                text: root.message || root.sizeSaveError || root.positionSaveError
-                                visible: text !== ""
-                                color: "#ffd2d2"
-                                wrapMode: Text.WordWrap
-                                font.family: Style.font.family
-                                font.pixelSize: Style.font.caption
-                            }
-                            RowLayout {
-                                id: feedControls
-                                readonly property real overlayInset: cameraOverlay.item && cameraOverlay.item.inset !== undefined
-                                    ? cameraOverlay.item.inset : 0
-                                readonly property real sideInset: Math.max(12, overlayInset + 6)
-                                anchors.left: cameraOverlay.width > 0 ? cameraOverlay.left : video.left
-                                anchors.right: cameraOverlay.width > 0 ? cameraOverlay.right : video.right
-                                anchors.bottom: cameraOverlay.height > 0 ? cameraOverlay.bottom : video.bottom
-                                anchors.leftMargin: sideInset
-                                anchors.rightMargin: sideInset
-                                anchors.bottomMargin: overlayInset + 12
-                                spacing: 6
-                                Item { Layout.fillWidth: true }
-                                FeedButton {
-                                    objectName: "fullscreenButton"
-                                    text: "⛶"
-                                    font.family: "JetBrainsMono Nerd Font"
-                                    Accessible.name: root.fullscreen ? "Exit fullscreen" : "Fullscreen"
-                                    tipText: root.fullscreen ? "Exit fullscreen" : "Fullscreen"
-                                    checked: root.fullscreen
-                                    onClicked: root.toggleFullscreen()
-                                    PointerArea {}
-                                }
+                            CameraFeed {
+                                id: secondaryFeed
+                                objectName: "secondaryFeed"
+                                visible: root.dualActive
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                Layout.preferredWidth: 1
+                                Layout.preferredHeight: 1
+                                camera: root.secondaryCamera
+                                streaming: root.streaming && root.dualActive
+                                compact: true
+                                videoStyle: primaryFeed.videoStyle
+                                tintStrength: primaryFeed.tintStrength
+                                pixelSize: primaryFeed.pixelSize
+                                overlayStyle: primaryFeed.overlayStyle
+                                onAudioRequested: root.toggleFeedAudio(secondaryFeed)
+                                onFullscreenRequested: root.enlargeCamera(camera.id || "")
                             }
                         }
                         Rectangle {
@@ -978,9 +858,9 @@ Panel {
                             Layout.fillWidth: true
                             Layout.preferredHeight: Math.min(appearanceColumn.implicitHeight + appearanceFooter.implicitHeight + 36, viewerPage.height * 0.6)
                             radius: 12
-                            color: Color.popups.background
+                            color: Commons.Color.popups.background
                             border.width: 1
-                            border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.65)
+                            border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.65)
                             ColumnLayout {
                                 anchors.fill: parent
                                 anchors.margins: 12
@@ -1014,7 +894,7 @@ Panel {
                                             implicitHeight: 32
                                             contentItem: Text {
                                                 text: videoStyleChooser.displayText
-                                                color: Color.popups.text
+                                                color: Commons.Color.popups.text
                                                 font.family: Style.font.family
                                                 font.pixelSize: Style.font.caption
                                                 verticalAlignment: Text.AlignVCenter
@@ -1022,17 +902,17 @@ Panel {
                                             }
                                             background: Rectangle {
                                                 radius: 10
-                                                color: Color.popups.background
+                                                color: Commons.Color.popups.background
                                                 border.width: 1
                                                 border.color: videoStyleChooser.activeFocus
-                                                    ? Color.accent
-                                                    : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                                    ? Commons.Color.accent
+                                                    : Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                                             }
                                             indicator: Text {
                                                 x: videoStyleChooser.width - width - 10
                                                 anchors.verticalCenter: parent.verticalCenter
                                                 text: "\u2304"
-                                                color: Color.popups.text
+                                                color: Commons.Color.popups.text
                                                 font.family: Style.font.family
                                                 font.pixelSize: Style.font.caption
                                             }
@@ -1046,8 +926,8 @@ Panel {
                                                 contentItem: Text {
                                                     text: parent.text
                                                     color: parent.highlighted
-                                                        ? Style.hoverStateColor(Color.popups.text, Color.accent)
-                                                        : Color.popups.text
+                                                        ? Style.hoverStateColor(Commons.Color.popups.text, Commons.Color.accent)
+                                                        : Commons.Color.popups.text
                                                     font.family: Style.font.family
                                                     font.pixelSize: Style.font.body
                                                     verticalAlignment: Text.AlignVCenter
@@ -1057,7 +937,7 @@ Panel {
                                                 background: Rectangle {
                                                     radius: 8
                                                     color: parent.hovered || parent.highlighted
-                                                        ? Style.hoverFillFor(Color.popups.text, Color.accent)
+                                                        ? Style.hoverFillFor(Commons.Color.popups.text, Commons.Color.accent)
                                                         : "transparent"
                                                 }
                                                 PointerArea {}
@@ -1079,9 +959,9 @@ Panel {
                                                 }
                                                 background: Rectangle {
                                                     radius: 12
-                                                    color: Color.popups.background
+                                                    color: Commons.Color.popups.background
                                                     border.width: 1
-                                                    border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.65)
+                                                    border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.65)
                                                 }
                                             }
                                             PointerArea {}
@@ -1108,16 +988,16 @@ Panel {
                                                     x: tintSlider.leftPadding
                                                     y: tintSlider.topPadding + tintSlider.availableHeight / 2 - height / 2
                                                     width: tintSlider.availableWidth; height: 4
-                                                    color: Color.popups.border
-                                                    Rectangle { width: tintSlider.visualPosition * parent.width; height: parent.height; color: Color.accent }
+                                                    color: Commons.Color.popups.border
+                                                    Rectangle { width: tintSlider.visualPosition * parent.width; height: parent.height; color: Commons.Color.accent }
                                                 }
                                                 handle: Rectangle {
                                                     x: tintSlider.leftPadding + tintSlider.visualPosition * (tintSlider.availableWidth - width)
                                                     y: tintSlider.topPadding + tintSlider.availableHeight / 2 - height / 2
                                                     implicitWidth: 14; implicitHeight: 18
-                                                    color: tintSlider.pressed ? Color.popups.text : Color.accent
+                                                    color: tintSlider.pressed ? Commons.Color.popups.text : Commons.Color.accent
                                                     border.width: tintSlider.activeFocus ? 2 : 1
-                                                    border.color: Color.popups.text
+                                                    border.color: Commons.Color.popups.text
                                                 }
                                                 PointerArea {}
                                             }
@@ -1155,16 +1035,16 @@ Panel {
                                                     x: pixelSlider.leftPadding
                                                     y: pixelSlider.topPadding + pixelSlider.availableHeight / 2 - height / 2
                                                     width: pixelSlider.availableWidth; height: 4
-                                                    color: Color.popups.border
-                                                    Rectangle { width: pixelSlider.visualPosition * parent.width; height: parent.height; color: Color.accent }
+                                                    color: Commons.Color.popups.border
+                                                    Rectangle { width: pixelSlider.visualPosition * parent.width; height: parent.height; color: Commons.Color.accent }
                                                 }
                                                 handle: Rectangle {
                                                     x: pixelSlider.leftPadding + pixelSlider.visualPosition * (pixelSlider.availableWidth - width)
                                                     y: pixelSlider.topPadding + pixelSlider.availableHeight / 2 - height / 2
                                                     implicitWidth: 14; implicitHeight: 18
-                                                    color: pixelSlider.pressed ? Color.popups.text : Color.accent
+                                                    color: pixelSlider.pressed ? Commons.Color.popups.text : Commons.Color.accent
                                                     border.width: pixelSlider.activeFocus ? 2 : 1
-                                                    border.color: Color.popups.text
+                                                    border.color: Commons.Color.popups.text
                                                 }
                                                 PointerArea {}
                                             }
@@ -1195,7 +1075,7 @@ Panel {
                                                 implicitHeight: 32
                                                 contentItem: Text {
                                                     text: overlayChooser.displayText
-                                                    color: Color.popups.text
+                                                    color: Commons.Color.popups.text
                                                     font.family: Style.font.family
                                                     font.pixelSize: Style.font.caption
                                                     verticalAlignment: Text.AlignVCenter
@@ -1203,17 +1083,17 @@ Panel {
                                                 }
                                                 background: Rectangle {
                                                     radius: 10
-                                                    color: Color.popups.background
+                                                    color: Commons.Color.popups.background
                                                     border.width: 1
                                                     border.color: overlayChooser.activeFocus
-                                                        ? Color.accent
-                                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                                        ? Commons.Color.accent
+                                                        : Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                                                 }
                                                 indicator: Text {
                                                     x: overlayChooser.width - width - 10
                                                     anchors.verticalCenter: parent.verticalCenter
                                                     text: "\u2304"
-                                                    color: Color.popups.text
+                                                    color: Commons.Color.popups.text
                                                     font.family: Style.font.family
                                                     font.pixelSize: Style.font.caption
                                                 }
@@ -1227,8 +1107,8 @@ Panel {
                                                     contentItem: Text {
                                                         text: parent.text
                                                         color: parent.highlighted
-                                                            ? Style.hoverStateColor(Color.popups.text, Color.accent)
-                                                            : Color.popups.text
+                                                            ? Style.hoverStateColor(Commons.Color.popups.text, Commons.Color.accent)
+                                                            : Commons.Color.popups.text
                                                         font.family: Style.font.family
                                                         font.pixelSize: Style.font.body
                                                         verticalAlignment: Text.AlignVCenter
@@ -1238,7 +1118,7 @@ Panel {
                                                     background: Rectangle {
                                                         radius: 8
                                                         color: parent.hovered || parent.highlighted
-                                                            ? Style.hoverFillFor(Color.popups.text, Color.accent)
+                                                            ? Style.hoverFillFor(Commons.Color.popups.text, Commons.Color.accent)
                                                             : "transparent"
                                                     }
                                                     PointerArea {}
@@ -1260,9 +1140,9 @@ Panel {
                                                     }
                                                     background: Rectangle {
                                                         radius: 12
-                                                        color: Color.popups.background
+                                                        color: Commons.Color.popups.background
                                                         border.width: 1
-                                                        border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.65)
+                                                        border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.65)
                                                     }
                                                 }
                                                 PointerArea {}
@@ -1294,14 +1174,14 @@ Panel {
                                     background: Rectangle {
                                         radius: height / 2
                                         color: parent.hovered
-                                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.35)
-                                            : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                                            ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.35)
+                                            : Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.18)
                                         border.width: 1
-                                        border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.55)
+                                        border.color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.55)
                                     }
                                     contentItem: Text {
                                         text: parent.text
-                                        color: Color.accent
+                                        color: Commons.Color.accent
                                         font.pixelSize: Style.font.caption
                                         font.weight: Font.DemiBold
                                         horizontalAlignment: Text.AlignHCenter
@@ -1344,14 +1224,14 @@ Panel {
                                     background: Rectangle {
                                         radius: height / 2
                                         color: parent.hovered
-                                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28)
-                                            : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.08)
+                                            ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.28)
+                                            : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.08)
                                         border.width: 1
-                                        border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                        border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                                     }
                                     contentItem: Text {
                                         text: parent.text
-                                        color: parent.hovered ? Color.accent : Color.popups.text
+                                        color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                                         font.pixelSize: 18
                                         font.weight: Font.DemiBold
                                         horizontalAlignment: Text.AlignHCenter
@@ -1378,11 +1258,11 @@ Panel {
                                 Accessible.name: "Camera name"
                                 background: Rectangle {
                                     radius: 10
-                                    color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.05)
+                                    color: Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.05)
                                     border.width: 1
                                     border.color: cameraName.activeFocus
-                                        ? Color.accent
-                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                        ? Commons.Color.accent
+                                        : Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                                 }
                             }
                             Label { text: "RTSP address"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.weight: Font.Medium }
@@ -1396,11 +1276,11 @@ Panel {
                                 Accessible.name: "RTSP address"
                                 background: Rectangle {
                                     radius: 10
-                                    color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.05)
+                                    color: Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.05)
                                     border.width: 1
                                     border.color: address.activeFocus
-                                        ? Color.accent
-                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                        ? Commons.Color.accent
+                                        : Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                                 }
                             }
                             Label { text: "Username"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.weight: Font.Medium }
@@ -1412,11 +1292,11 @@ Panel {
                                 Accessible.name: "Username"
                                 background: Rectangle {
                                     radius: 10
-                                    color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.05)
+                                    color: Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.05)
                                     border.width: 1
                                     border.color: username.activeFocus
-                                        ? Color.accent
-                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                        ? Commons.Color.accent
+                                        : Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                                 }
                             }
                             Label { text: "Password"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.weight: Font.Medium }
@@ -1429,11 +1309,11 @@ Panel {
                                 Accessible.name: "Password"
                                 background: Rectangle {
                                     radius: 10
-                                    color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.05)
+                                    color: Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.05)
                                     border.width: 1
                                     border.color: password.activeFocus
-                                        ? Color.accent
-                                        : Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                        ? Commons.Color.accent
+                                        : Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                                 }
                             }
                             Label {
@@ -1488,14 +1368,14 @@ Panel {
                                     background: Rectangle {
                                         radius: height / 2
                                         color: parent.hovered
-                                            ? Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.12)
-                                            : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.06)
+                                            ? Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.12)
+                                            : Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.06)
                                         border.width: 1
-                                        border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g, Color.popups.border.b, 0.5)
+                                        border.color: Qt.rgba(Commons.Color.popups.border.r, Commons.Color.popups.border.g, Commons.Color.popups.border.b, 0.5)
                                     }
                                     contentItem: Text {
                                         text: parent.text
-                                        color: parent.hovered ? Color.accent : Color.popups.text
+                                        color: parent.hovered ? Commons.Color.accent : Commons.Color.popups.text
                                         font.pixelSize: Style.font.caption
                                         font.weight: Font.Medium
                                         horizontalAlignment: Text.AlignHCenter
@@ -1515,13 +1395,13 @@ Panel {
                                     background: Rectangle {
                                         radius: height / 2
                                         color: parent.hovered
-                                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.4)
-                                            : Color.accent
+                                            ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.4)
+                                            : Commons.Color.accent
                                         border.width: 0
                                     }
                                     contentItem: Text {
                                         text: parent.text
-                                        color: parent.hovered ? "#ffffff" : Qt.darker(Color.accent, 1.8)
+                                        color: parent.hovered ? "#ffffff" : Qt.darker(Commons.Color.accent, 1.8)
                                         font.pixelSize: Style.font.caption
                                         font.weight: Font.DemiBold
                                         horizontalAlignment: Text.AlignHCenter
@@ -1543,38 +1423,6 @@ Panel {
                         onClosed: root.closeMotionGallery()
                     }
                 }
-            }
-            component FeedButton: Controls.Button {
-                id: feedButton
-                property string tipText: ""
-                implicitWidth: 36
-                implicitHeight: 36
-                padding: 0
-                font.pixelSize: 18
-                hoverEnabled: true
-                PanelToolTip {
-                    visible: feedButton.hovered && feedButton.tipText !== ""
-                    text: feedButton.tipText
-                    fontSize: Style.font.caption
-                }
-                contentItem: Text {
-                    text: parent.text
-                    font: parent.font
-                    color: !feedButton.enabled ? Color.muted
-                        : feedButton.checked || feedButton.hovered || feedButton.activeFocus ? Color.accent : Color.foreground
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    radius: 18
-                    color: feedButton.hovered || feedButton.checked
-                        ? Qt.rgba(0, 0, 0, 0.35)
-                        : Qt.rgba(0, 0, 0, 0.22)
-                    border.width: 1
-                    border.color: !feedButton.enabled ? Color.muted
-                        : feedButton.checked || feedButton.hovered || feedButton.activeFocus ? Color.accent : Qt.rgba(1, 1, 1, 0.12)
-                }
-                PointerArea {}
             }
             // Use scene coordinates: the popup can shift as its size changes.
             // Local mouse coordinates alone would feed that shift into the drag.

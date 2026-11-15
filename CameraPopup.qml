@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Plugin-local adaptation of Omarchy KeyboardPanel with non-modal pinning.
@@ -48,7 +49,7 @@ PanelWindow {
   property int padding: Style.spacing.popupPadding
   property int contentWidth: Style.space(280)
   property int contentHeight: Style.space(200)
-  property var borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(1)))
+  property var borderSpec: Border.surfaceSpec("popups", "border", Commons.Color.popups.border, Math.max(1, Style.space(1)))
   property int cardRadius: Math.max(Style.cornerRadius, 14)
   property bool centerOnBar: false
   property bool open: false
@@ -65,7 +66,7 @@ PanelWindow {
   // Combined into the input mask so pinned mode still delivers clicks there.
   property rect extraInput: Qt.rect(0, 0, 0, 0)
   Behavior on chromeOpacity {
-    NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+    NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic }
   }
 
   onPinnedChanged: {
@@ -445,7 +446,7 @@ PanelWindow {
     BorderSurface {
       id: cardBackground
       anchors.fill: parent
-      color: Color.popups.background
+      color: Commons.Color.popups.background
       borderSpec: root.borderSpec
       padding: root.padding
       radius: root.cardRadius
@@ -454,7 +455,7 @@ PanelWindow {
 
     Behavior on opacity {
       enabled: !root.popoutSwitching && !root.popoutSwitchClosing
-      NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+      NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic }
     }
 
     // Swallow clicks on the card so they don't bubble to the dismissal
@@ -475,7 +476,7 @@ PanelWindow {
 
       Behavior on opacity {
         enabled: root.popoutSwitching
-        NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+        NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic }
       }
     }
   }

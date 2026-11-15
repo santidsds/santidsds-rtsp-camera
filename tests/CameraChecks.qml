@@ -3,10 +3,15 @@ import QtTest
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import "Camera"
 ShellRoot {
+    // CAMERA_TEST_SCREEN keeps test surfaces on a chosen (e.g. headless) output.
+    readonly property var testScreen: Quickshell.screens.find(function(s) {
+        return s.name === Quickshell.env("CAMERA_TEST_SCREEN") }) || null
     PanelWindow {
         id: effectWindow
+        screen: testScreen
         visible: false
         implicitWidth: 360
         implicitHeight: 180
@@ -32,6 +37,7 @@ ShellRoot {
     FileView { id: processStats; path: "/proc/" + Quickshell.processId + "/stat"; blockLoading: true }
     PanelWindow {
         id: barWindow
+        screen: testScreen
         anchors { top: true; left: true; right: true }
         implicitHeight: 28
         Item { id: anchor; x: 700; width: 30; height: 28 }
@@ -52,7 +58,9 @@ ShellRoot {
         interval: 1000; running: true
         onTriggered: {
             try {
-                if (Quickshell.env("CAMERA_TEST_BENCHMARK") === "1") probe.runVideoStyles(true)
+                if (Quickshell.env("CAMERA_TEST_DUAL_ONLY") === "1") probe.runDualView()
+                else if (Quickshell.env("CAMERA_TEST_RECONNECT_ONLY") === "1") probe.runReconnect()
+                else if (Quickshell.env("CAMERA_TEST_BENCHMARK") === "1") probe.runVideoStyles(true)
                 else {
                     probe.runAppearance(); probe.runOverlayPixels(); probe.runEffectPixels(); probe.runDrag()
                     if (Quickshell.env("CAMERA_TEST_UI_ONLY") !== "1") { probe.runVideoStyles(false); probe.runReconnect() }
@@ -113,8 +121,73 @@ ShellRoot {
             }), "request visual capture")
             eventually(function() { return complete }, 2000)
         }
+        function runDualView() {
+            panel.close()
+            var first = {id: "first", name: "<b>Front door</b>", url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
+            var second = {id: "second", name: "Garage", url: first.url, username: "", password: ""}
+            panel.cameras = [first, second]
+            panel.selectedCameraId = first.id
+            panel.config = first
+            panel.configured = true
+            panel.configuring = false
+            panel.dualView = true
+            panel.viewerWidth = 1000; panel.viewerHeight = 550
+            panel.open(); panel.pinned = true
+            var primary = find(panel, function(i) { return i.objectName === "primaryFeed" })
+            var secondary = find(panel, function(i) { return i.objectName === "secondaryFeed" })
+            var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
+            var grid = find(panel, function(i) { return i.objectName === "feedGrid" })
+            parent = popup.contentItem[0]
+            eventually(function() { return primary.live && secondary.live }, 5000)
+            equal(state().viewMode, "dual", "two-camera mode is the default")
+            equal(grid.columns, 2, "wide viewer places cameras side by side")
+            assertOk(Math.abs(primary.width - secondary.width) < 1 && primary.x < secondary.x, "tiles have equal width")
+            var name = find(primary, function(i) { return i.objectName === "feedName" })
+            equal(name.textFormat, Text.PlainText, "camera name with markup remains plain text")
+            equal(name.text, first.name, "camera name is preserved literally")
+            var audio1 = find(primary, function(i) { return i.objectName === "audioButton" })
+            var audio2 = find(secondary, function(i) { return i.objectName === "audioButton" })
+            mouseClick(audio1); wait(80)
+            assertOk(!primary.status().muted && secondary.status().muted, "first tile can play audio")
+            mouseClick(audio2); wait(80)
+            assertOk(primary.status().muted && !secondary.status().muted, "audio switches exclusively to second tile")
+            capture(parent, "dual-wide")
+            panel.viewerWidth = 420; panel.viewerHeight = 650
+            wait(150)
+            equal(grid.columns, 1, "narrow viewer stacks cameras")
+            assertOk(primary.y < secondary.y && Math.abs(primary.height - secondary.height) < 1, "stacked tiles share the height")
+            var dualButton = find(panel, function(i) { return i.objectName === "dualViewButton" })
+            assertOk(dualButton.mapToItem(parent,0,0).x >= 0, "narrow header stays within the viewer")
+            capture(parent, "dual-narrow")
+            panel.viewerWidth = 1000; panel.viewerHeight = 550
+            var expand = find(secondary, function(i) { return i.objectName === "fullscreenButton" })
+            mouseClick(expand)
+            eventually(function() { return panel.fullscreen && primary.camera.id === second.id }, 1000)
+            equal(state().viewMode, "focus", "enlarge the second camera")
+            assertOk(!secondary.streaming && !secondary.status().playing, "hidden tile releases its stream")
+            panel.exitFullscreenIfActive(null)
+            eventually(function() { return primary.live && secondary.live }, 5000)
+            equal(state().viewMode, "dual", "escape restores both cameras")
+            mouseClick(dualButton)
+            assertOk(!panel.dualView && !secondary.streaming, "Dual button returns to individual view")
+            mouseClick(dualButton)
+            eventually(function() { return primary.live && secondary.live }, 5000)
+            var before = primary.framesReceived
+            secondary.camera = {id: "second", name: "Offline camera", url: "rtsp://127.0.0.1:1/offline", username: "", password: ""}
+            eventually(function() { return secondary.status().reconnectPending }, 4000)
+            wait(400)
+            assertOk(primary.live && primary.framesReceived > before, "one camera's failure leaves the other live")
+            panel.openMotionGallery()
+            assertOk(!primary.streaming && !secondary.streaming, "gallery pauses both players")
+            panel.closeMotionGallery()
+            eventually(function() { return primary.live }, 5000)
+            panel.close()
+            assertOk(!primary.status().playing && !secondary.status().playing
+                && !primary.status().reconnectPending && !secondary.status().reconnectPending, "closing releases both players and retry timers")
+            console.log("PASS: simultaneous video, responsive grid, safe names, exclusive audio, focus/restore, independent failure and cleanup")
+        }
         function runProfiles() {
-            panel.open()
+            panel.open(); panel.pinned = true
             panel.editSettings(true)
             var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
             var content = popup.contentItem[0]
@@ -347,7 +420,7 @@ ShellRoot {
                 }
                 capture(content, "profile-" + profile)
             }
-            equal(effect.parent.border.color.toString(), Color.accent.toString(), "video frame follows theme accent")
+            equal(effect.parent.border.color.toString(), Commons.Color.accent.toString(), "video frame follows theme accent")
             equal(effect.style, "theme-pixel", "applied effect remains after editor hides")
             click(themeButton)
             equal(chooser.currentIndex, 3, "reopening loads saved style")
@@ -405,9 +478,9 @@ ShellRoot {
             wait(200)
             assertOk(sameResampledImage(original, grabImage(fixture)), "one pixel size preserves detail on scaled monitors")
             fixtureEffect.pixelSize = 3
-            var oldBackground = Color.background, oldForeground = Color.foreground, oldAccent = Color.accent
+            var oldBackground = Commons.Color.background, oldForeground = Commons.Color.foreground, oldAccent = Commons.Color.accent
             try {
-                Color.background = "black"; Color.foreground = "red"; Color.accent = "red"
+                Commons.Color.background = "black"; Commons.Color.foreground = "red"; Commons.Color.accent = "red"
                 fixtureEffect.style = "theme"; fixtureEffect.strength = 1
                 wait(200)
                 var tinted = grabImage(fixture)
@@ -418,7 +491,7 @@ ShellRoot {
                 wait(200)
                 assertOk(sameResampledImage(original, grabImage(fixture)), "zero tint preserves original colors on scaled monitors")
                 fixtureEffect.strength = 1
-                Color.foreground = "lime"; Color.accent = "lime"
+                Commons.Color.foreground = "lime"; Commons.Color.accent = "lime"
                 wait(200)
                 var changed = grabImage(fixture)
                 assertOk(changed.green(180 * scale, 80 * scale) > 100 && changed.red(180 * scale, 80 * scale) < 5,
@@ -431,7 +504,7 @@ ShellRoot {
                 wait(100)
                 assertOk(original.equals(grabImage(fixture)) && fixtureEffect.item === null, "inactive effect releases capture and restores source")
             } finally {
-                Color.background = oldBackground; Color.foreground = oldForeground; Color.accent = oldAccent
+                Commons.Color.background = oldBackground; Commons.Color.foreground = oldForeground; Commons.Color.accent = oldAccent
                 fixtureEffect.style = "original"; fixtureEffect.active = true
                 effectWindow.visible = false
             }
@@ -458,7 +531,7 @@ ShellRoot {
             wait(200)
             equal(fixtureOverlay.item.tick, defaultTick, "Default needs no terminal animation clock")
             fixtureOverlay.live = true
-            equal(corner.color.toString(), Color.accent.toString(), "connected corners use theme accent")
+            equal(corner.color.toString(), Commons.Color.accent.toString(), "connected corners use theme accent")
             var defaultImage = grabImage(fixture)
             capture(fixture, "overlay-default")
             fixtureOverlay.mode = "coder"
@@ -542,12 +615,12 @@ ShellRoot {
             terminal.visible = true
             wait(100)
             liveImage = grabImage(fixture)
-            var oldAccent = Color.accent
+            var oldAccent = Commons.Color.accent
             try {
-                Color.accent = Color.accent.toString() === "#ff0000" ? "lime" : "red"
+                Commons.Color.accent = Commons.Color.accent.toString() === "#ff0000" ? "lime" : "red"
                 wait(100)
                 assertOk(!liveImage.equals(grabImage(fixture)), "overlay follows palette changes")
-            } finally { Color.accent = oldAccent }
+            } finally { Commons.Color.accent = oldAccent }
             fixtureOverlay.active = false
             wait(100)
             assertOk(fixtureOverlay.item === null && original.equals(grabImage(fixture)), "inactive overlay releases geometry")
@@ -589,10 +662,11 @@ ShellRoot {
         }
         function state() { return JSON.parse(panel.playbackStatus()) }
         function runReconnect() {
+            panel.videoStyle = "original"
             panel.config = {url: "rtsp://127.0.0.1:1/live", username: "", password: ""}
             panel.configured = true
             panel.configuring = false
-            panel.open()
+            panel.open(); panel.pinned = true
             eventually(function() { return state().reconnectPending }, 4000)
             equal(state().retryDelay, 2000, "first retry delay")
             eventually(function() { return state().retryAttempt >= 2 }, 5000)
@@ -618,10 +692,9 @@ ShellRoot {
             assertOk(!state().reconnectPending, "close cancels reconnect")
             wait(2200)
             assertOk(!state().playing && !state().timeoutRunning, "closed viewer remains stopped")
-            panel.open()
+            panel.open(); panel.pinned = true
             eventually(function() { return state().reconnectPending }, 4000)
             panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
-            panel.play(false)
             eventually(function() { return state().live }, 5000)
             equal(state().retryAttempt, 0, "healthy frames reset retry delay")
             assertOk(!state().reconnectPending, "healthy stream cancels retries")
@@ -629,8 +702,12 @@ ShellRoot {
             player.stop()
             eventually(function() { return state().reconnectPending }, 2000)
             equal(state().retryDelay, 2000, "interrupted live stream retries")
+            // Drain the previous file's queued video frames before testing a
+            // new file with a deliberately ten-second gap between frames.
+            panel.close()
+            wait(150)
             panel.config = {url: Qt.resolvedUrl("stall.mp4").toString(), username: "", password: ""}
-            panel.play()
+            panel.open(); panel.pinned = true
             eventually(function() { return state().live }, 5000)
             eventually(function() { return state().reconnectPending }, 7000)
             assertOk(state().message.indexOf("Video stalled.") === 0, "stalled frames trigger recovery")
@@ -646,7 +723,7 @@ ShellRoot {
             var title = find(popup.contentItem[0], function(i) { return i.objectName === "headerDragSpace" })
             console.log("TITLE", title)
             console.log("GEOMETRY", title.width, title.height, popup.cardOrigin)
-            var pin = find(popup.contentItem[0], function(i) { return i.objectName === "pinSwitch" || i.checkable === true })
+            var pin = find(popup.contentItem[0], function(i) { return i.objectName === "pinSwitch" })
             assertOk(pin !== null && pin.checked, "pin toggle reflects pinned mode")
             mouseClick(pin)
             assertOk(!panel.pinned && !pin.checked, "pin toggle unpins")

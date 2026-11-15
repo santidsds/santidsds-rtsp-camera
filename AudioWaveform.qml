@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 Controls.Button {
@@ -32,7 +33,7 @@ Controls.Button {
     background: Rectangle {
         color: "transparent"
         border.width: root.activeFocus ? 2 : root.hovered ? 1 : 0
-        border.color: Color.accent
+        border.color: Commons.Color.accent
     }
     contentItem: Item {
         id: bars
@@ -45,7 +46,7 @@ Controls.Button {
                 width: Math.max(1, bars.width / 21 - 2)
                 height: 3 + 25 * Math.abs(Math.sin(index * 0.73 + root.tick * 0.24)
                     * Math.cos(index * 0.21 - root.tick * 0.155))
-                color: Color.accent
+                color: Commons.Color.accent
                 opacity: !root.audioAvailable ? 0.25 : root.audioMuted ? 0.45 : 0.9
             }
         }
@@ -54,7 +55,7 @@ Controls.Button {
             anchors.centerIn: parent
             width: parent.width; height: 1
             rotation: -12
-            color: Color.accent
+            color: Commons.Color.accent
             opacity: root.audioAvailable ? 1 : 0.35
         }
     }

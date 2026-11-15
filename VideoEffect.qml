@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Capture only the video. Labels and buttons stay outside this effect.
 Loader {
@@ -33,9 +34,9 @@ Loader {
                 anchors.fill: parent
                 visible: !parent.failed
                 property variant source: capture
-                property color shadowColor: Color.background
-                property color lightColor: Color.foreground
-                property color accentColor: Color.accent
+                property color shadowColor: Commons.Color.background
+                property color lightColor: Commons.Color.foreground
+                property color accentColor: Commons.Color.accent
                 property real tintAmount: root.tinted ? root.strength : 0
                 fragmentShader: Qt.resolvedUrl("shaders/video.frag.qsb")
             }

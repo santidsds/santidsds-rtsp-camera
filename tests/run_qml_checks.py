@@ -29,6 +29,13 @@ with tempfile.TemporaryDirectory(prefix="camera-checks-") as temporary:
     ], check=True)
     environment = dict(os.environ, XDG_CONFIG_HOME=str(work / "config"),
                        QT_QUICK_CONTROLS_STYLE="Basic", CAMERA_CLOCK_TICKS=str(os.sysconf("SC_CLK_TCK")))
+    screen = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--screen=")), "")
+    if screen:
+        environment["CAMERA_TEST_SCREEN"] = screen
+    if "--reconnect-only" in sys.argv[1:]:
+        environment["CAMERA_TEST_RECONNECT_ONLY"] = "1"
+    if "--dual-only" in sys.argv[1:]:
+        environment["CAMERA_TEST_DUAL_ONLY"] = "1"
     if "--ui-only" in sys.argv[1:]:
         environment["CAMERA_TEST_UI_ONLY"] = "1"
     if "--benchmark" in sys.argv[1:]:
@@ -38,7 +45,7 @@ with tempfile.TemporaryDirectory(prefix="camera-checks-") as temporary:
         captures.mkdir(exist_ok=True)
         environment["CAMERA_TEST_CAPTURE_DIR"] = str(captures)
     result = subprocess.run(["quickshell", "-p", str(work), "--no-color"],
-                            env=environment, capture_output=True, text=True, timeout=100)
+                            env=environment, capture_output=True, text=True, timeout=150)
     output = result.stdout + result.stderr
     print(output)
     if result.returncode or "CAMERA_CHECKS_PASSED" not in output or "CAMERA_CHECKS_FAILED" in output:

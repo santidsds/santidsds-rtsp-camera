@@ -16,6 +16,10 @@ shows RTSP camera feeds in a themed, pinnable card on your desktop.
   monitors.
 - **Viewer** — resizable card (drag corners; double-click to reset). Size and
   per-monitor pinned position persist under `~/.config/rtsp-camera/`.
+- **Dual view** — shows the selected camera and a second saved camera together.
+  Wide cards place them side by side; narrow cards stack them. **Dual** toggles
+  the individual view. Each tile reconnects independently; audio plays from
+  one camera at a time. Use a tile's **⛶** to enlarge it, then Esc to return.
 - **Pin** — switch stays above other windows; drag the empty header to move it.
   Chrome fades when the pointer leaves; hover brings it back. Pin resets on close.
 - **Streaming** — audio starts muted (waveform toggle), auto-reconnect with
@@ -35,11 +39,12 @@ prefer RTSps if your camera supports it.
 
 ## Design changes
 
-UI/UX only — same streaming model and settings format as upstream.
+Camera profiles keep the same settings format. Each visible tile has its own
+player and recovery loop, and both share the existing video appearance settings.
 
 | Area | Change |
 |------|--------|
-| **Header** | Camera selector → **Motion** → **Themes** → **Config** → pill pin switch → round **×** close. |
+| **Header** | Camera selector → **Motion** → **Dual** → **Themes** → **Config** → pill pin switch → round **×** close. Controls use compact symbols in narrow cards. |
 | **Fullscreen** | Only bottom-right **⛶** on the video; removed from the header. |
 | **Themes entry** | First-class **Themes** button in the header (replaces the old palette icon). |
 | **Pill controls** | Motion / Themes / Config / pin use Omarchy `Controls.Button` with rounded hover fills. |
