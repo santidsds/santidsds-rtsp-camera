@@ -507,18 +507,6 @@ Panel {
                         readonly property bool compact: width < 620
                         anchors.fill: parent
                         spacing: 8
-                        MacWindowControls {
-                            id: windowControls
-                            Layout.leftMargin: 4
-                            Layout.rightMargin: 4
-                            Layout.alignment: Qt.AlignVCenter
-                            zoomEnabled: root.configured && !root.configuring && !root.showingMotion
-                            zoomed: root.fullscreen
-                            closeTip: strings.t("window.close")
-                            zoomTip: root.fullscreen ? strings.t("window.exitFullScreen") : strings.t("window.fullScreen")
-                            onCloseRequested: root.close()
-                            onZoomRequested: root.toggleFullscreen()
-                        }
                         Controls.ComboBox {
                             id: cameraSelector
                             objectName: "cameraSelector"
@@ -761,6 +749,15 @@ Panel {
                                         root.configuring = false
                                     } else root.editSettings()
                                 }
+                            }
+                            MacToolbarButton {
+                                objectName: "fullscreenToolbarButton"
+                                glyph: root.fullscreen ? ui.iconFullscreenExit : ui.iconFullscreen
+                                tipText: root.fullscreen ? strings.t("window.exitFullScreen") : strings.t("window.fullScreen")
+                                visible: !root.configuring && !root.showingMotion
+                                enabled: root.configured
+                                checked: root.fullscreen
+                                onClicked: root.toggleFullscreen()
                             }
                             MacToolbarButton {
                                 id: pinSwitch

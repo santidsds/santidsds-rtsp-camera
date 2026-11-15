@@ -4,7 +4,7 @@ import qs.Commons as Commons
 
 // macOS-style design tokens shared by the camera views. Colors derive from the
 // Omarchy palette so the accent follows the theme (Graphite on grey themes);
-// only status and window-control colors use Apple's fixed system values.
+// only status colors use Apple's fixed system values.
 QtObject {
     id: ui
 
@@ -45,9 +45,6 @@ QtObject {
     readonly property color systemGreen: "#30d158"
     readonly property color systemOrange: "#ff9f0a"
     readonly property color systemRed: "#ff453a"
-    readonly property color closeLight: "#ff5f57"
-    readonly property color minimizeLight: "#febc2e"
-    readonly property color zoomLight: "#28c840"
 
     readonly property int controlRadius: 7
     readonly property int groupRadius: 10

@@ -26,8 +26,8 @@ shows RTSP camera feeds in a themed, pinnable card on your desktop.
   Chrome fades when the pointer leaves; hover brings it back. Pin resets on close.
 - **Streaming** — audio starts muted (waveform toggle), auto-reconnect with
   backoff (2→30s), status dots turn orange while connecting and red while
-  offline. The green window control or a tile's **⛶** enters full screen
-  (Esc exits).
+  offline. The toolbar's full-screen button or a tile's **⛶** enters full
+  screen (Esc exits).
 - **Appearance** — live preview of video styles (Original / Omarchy / Pixel /
   Omarchy Pixel) and overlays (Default / Coder / Hackerman). **Apply** saves
   for every camera; dismissing the section discards unapplied changes.
@@ -48,7 +48,7 @@ when installed, otherwise Inter, otherwise the Omarchy font.
 
 | Area | Design |
 |------|--------|
-| **Toolbar** | Window controls (red closes, green toggles full screen; yellow is shown disabled, as macOS does for windows that cannot minimize) → camera menu with a status dot → **Live / Motion** segmented control → icon buttons for two-camera view, appearance, settings and keep-on-top. Narrow cards switch the segments to icons. |
+| **Toolbar** | Camera menu with a status dot → **Live / Motion** segmented control → icon buttons for two-camera view, appearance, settings, keep-on-top and full screen. Narrow cards switch the segments to icons. Esc or clicking outside closes the viewer. |
 | **Video** | Each tile hugs its stream's aspect ratio with rounded corners and a hairline edge — no letterboxing. Glass controls: speaker button (widens with level bars while audio plays) and full screen. Dual tiles show a name pill with a status dot. |
 | **Status** | Green dot = live, pulsing orange = connecting, red = offline/retrying. Connection messages appear in a glass capsule with a spinner. |
 | **Sizing** | Like Picture in Picture, the live card fits the video: the saved height is an upper bound, and corner drags scale proportionally. The appearance inspector grows the card while open. |

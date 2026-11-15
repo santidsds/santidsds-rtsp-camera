@@ -159,21 +159,22 @@ ShellRoot {
             assertOk(popup.contentWidth > startWidth + 100 && popup.contentHeight > startHeight + 40,
                 "corner drag scales the live view proportionally")
             assertOk(Math.abs(frame.height - feed.height) < 2, "resized view still has no letterbox")
-            // Window controls.
-            var zoom = field("zoomButton")
-            assertOk(zoom.enabled, "green light is available in live view")
+            // Full screen is a toolbar button like the others.
+            assertOk(field("closeButton") === null && field("zoomButton") === null, "no window-control dots in the toolbar")
+            var zoom = field("fullscreenToolbarButton")
+            assertOk(zoom.visible && zoom.enabled && !zoom.checked, "full screen button is in the live toolbar")
             mouseClick(zoom)
-            assertOk(panel.fullscreen && popup.contentWidth === popup.availableCardWidth, "green light enters full screen")
+            assertOk(panel.fullscreen && zoom.checked && popup.contentWidth === popup.availableCardWidth,
+                "toolbar button enters full screen")
             mouseClick(zoom)
-            assertOk(!panel.fullscreen, "green light leaves full screen")
-            assertOk(!field("minimizeLight").enabled, "yellow light is disabled, as for windows that cannot minimize")
+            assertOk(!panel.fullscreen && !zoom.checked, "toolbar button leaves full screen")
             // Live / Motion segmented control.
             var modes = field("viewModeControl")
             equal(modes.currentIndex, 0, "Live is selected while streaming")
             mouseClick(field("motionButton"))
             assertOk(panel.showingMotion && !state().streaming, "Motion segment opens the gallery and pauses video")
             equal(modes.currentIndex, 1, "Motion segment shows as selected")
-            assertOk(!field("zoomButton").enabled, "green light is disabled outside live view")
+            assertOk(!field("fullscreenToolbarButton").visible, "full screen button hides outside live view")
             mouseClick(field("liveButton"))
             assertOk(!panel.showingMotion, "Live segment returns to video")
             eventually(function() { return state().live }, 5000)
@@ -193,12 +194,13 @@ ShellRoot {
             var apply = field("applyStyle")
             assertOk(contrast(apply.contentItem.color, apply.background.color) >= 3,
                 "default button label contrasts with the accent")
-            // The red light closes the viewer.
-            mouseClick(field("closeButton"))
-            assertOk(!panel.opened, "red light closes the viewer")
+            // Without a close button, Esc still closes the viewer.
+            content.forceActiveFocus()
+            keyClick(Qt.Key_Escape)
+            assertOk(!panel.opened, "Esc closes the viewer")
             panel.viewerWidth = 640; panel.viewerHeight = 500
             panel.configured = false
-            console.log("PASS: window controls, Live/Motion segments, toolbar toggles, PiP sizing, proportional resize, contrast")
+            console.log("PASS: toolbar full screen, Live/Motion segments, toolbar toggles, PiP sizing, proportional resize, contrast")
         }
         function runMotionGallery() {
             panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
