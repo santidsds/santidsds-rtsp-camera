@@ -63,6 +63,7 @@ ShellRoot {
                 else if (Quickshell.env("CAMERA_TEST_BENCHMARK") === "1") probe.runVideoStyles(true)
                 else {
                     probe.runAppearance(); probe.runOverlayPixels(); probe.runEffectPixels(); probe.runDrag()
+                    probe.runAppleChrome(); probe.runMotionGallery()
                     if (Quickshell.env("CAMERA_TEST_UI_ONLY") !== "1") { probe.runVideoStyles(false); probe.runReconnect() }
                     probe.runProfiles()
                 }
@@ -121,6 +122,124 @@ ShellRoot {
             }), "request visual capture")
             eventually(function() { return complete }, 2000)
         }
+        function contrast(a, b) {
+            function lum(c) {
+                function ch(v) { return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+                return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
+            }
+            var hi = Math.max(lum(a), lum(b)), lo = Math.min(lum(a), lum(b))
+            return (hi + 0.05) / (lo + 0.05)
+        }
+        function runAppleChrome() {
+            panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
+            panel.configured = true; panel.configuring = false
+            panel.viewerWidth = 900; panel.viewerHeight = 900
+            panel.pinned = true; panel.open()
+            eventually(function() { return state().live }, 5000)
+            var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
+            var content = popup.contentItem[0]
+            parent = content
+            function field(name) { return find(content, function(i) { return i.objectName === name }) }
+            var feed = field("primaryFeed"), frame = field("videoFrame")
+            eventually(function() { return Math.abs(feed.aspect - 320 / 240) < 0.01 }, 2000)
+            wait(150)
+            // Picture-in-Picture sizing: the card hugs the stream instead of letterboxing it.
+            assertOk(popup.contentHeight < panel.viewerHeight, "live card is shorter than the saved height bound")
+            assertOk(Math.abs(frame.width / frame.height - feed.aspect) < 0.02, "video frame keeps the stream aspect")
+            assertOk(Math.abs(frame.width - feed.width) < 1 && Math.abs(frame.height - feed.height) < 2,
+                "no letterbox around the video")
+            popup.movePinned(40, 40)
+            wait(50)
+            var grip = field("resizeGripRight")
+            var startWidth = popup.contentWidth, startHeight = popup.contentHeight
+            mousePress(grip, 10, 10, Qt.LeftButton)
+            mouseMove(grip, 130, 20, 50)
+            mouseRelease(grip, 130, 20, Qt.LeftButton)
+            wait(150)
+            assertOk(popup.contentWidth > startWidth + 100 && popup.contentHeight > startHeight + 40,
+                "corner drag scales the live view proportionally")
+            assertOk(Math.abs(frame.height - feed.height) < 2, "resized view still has no letterbox")
+            // Window controls.
+            var zoom = field("zoomButton")
+            assertOk(zoom.enabled, "green light is available in live view")
+            mouseClick(zoom)
+            assertOk(panel.fullscreen && popup.contentWidth === popup.availableCardWidth, "green light enters full screen")
+            mouseClick(zoom)
+            assertOk(!panel.fullscreen, "green light leaves full screen")
+            assertOk(!field("minimizeLight").enabled, "yellow light is disabled, as for windows that cannot minimize")
+            // Live / Motion segmented control.
+            var modes = field("viewModeControl")
+            equal(modes.currentIndex, 0, "Live is selected while streaming")
+            mouseClick(field("motionButton"))
+            assertOk(panel.showingMotion && !state().streaming, "Motion segment opens the gallery and pauses video")
+            equal(modes.currentIndex, 1, "Motion segment shows as selected")
+            assertOk(!field("zoomButton").enabled, "green light is disabled outside live view")
+            mouseClick(field("liveButton"))
+            assertOk(!panel.showingMotion, "Live segment returns to video")
+            eventually(function() { return state().live }, 5000)
+            // Toolbar toggles reflect state.
+            var settings = field("configButton")
+            mouseClick(settings)
+            assertOk(panel.configuring && settings.checked, "settings button opens settings and stays highlighted")
+            mouseClick(settings)
+            assertOk(!panel.configuring && !settings.checked, "settings button toggles back to live")
+            var pin = field("pinSwitch")
+            assertOk(pin.checked, "pin button highlights while pinned")
+            // Typography and contrast.
+            var title = field("selectorTitle")
+            equal(title.textFormat, Text.PlainText, "toolbar title is plain text")
+            assertOk(["SF Pro Text", "SF Pro Display", "SF Pro", "Inter Variable", "Inter", Style.font.family]
+                .indexOf(title.font.family) >= 0, "toolbar uses the system UI font")
+            var apply = field("applyStyle")
+            assertOk(contrast(apply.contentItem.color, apply.background.color) >= 3,
+                "default button label contrasts with the accent")
+            // The red light closes the viewer.
+            mouseClick(field("closeButton"))
+            assertOk(!panel.opened, "red light closes the viewer")
+            panel.viewerWidth = 640; panel.viewerHeight = 500
+            panel.configured = false
+            console.log("PASS: window controls, Live/Motion segments, toolbar toggles, PiP sizing, proportional resize, contrast")
+        }
+        function runMotionGallery() {
+            panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
+            panel.configured = true; panel.configuring = false
+            panel.pinned = true; panel.open()
+            var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
+            var content = popup.contentItem[0]
+            parent = content
+            function field(name) { return find(content, function(i) { return i.objectName === name }) }
+            panel.openMotionGallery()
+            var gallery = field("motionGallery")
+            eventually(function() { return gallery.visible && !gallery.loading }, 4000)
+            gallery.items = []
+            wait(50)
+            assertOk(field("motionEmpty").visible && !field("motionGrid").visible, "empty state when there are no stills")
+            var markup = "<img src=\"https://example.invalid/tracker\">"
+            gallery.items = [
+                {name: "a.jpg", path: "/nonexistent/a.jpg", time: "22:49:17", date: gallery.today},
+                {name: "b.jpg", path: "/nonexistent/b.jpg", time: markup, date: "2000-01-02"}]
+            wait(150)
+            assertOk(field("motionGrid").visible && !field("motionEmpty").visible, "grid shows stills")
+            assertOk(field("motionSubtitle").text.indexOf("2") === 0, "subtitle counts the stills")
+            var caption = find(gallery, function(i) { return typeof i.text === "string" && i.text.indexOf(markup) >= 0 })
+            assertOk(caption !== null && caption.textFormat === Text.PlainText, "still captions stay plain text")
+            gallery.selectedIndex = 0
+            gallery.forceActiveFocus()
+            assertOk(field("motionPreview").visible, "viewer opens on a still")
+            keyClick(Qt.Key_Right)
+            equal(gallery.selectedIndex, 1, "right arrow shows the next still")
+            keyClick(Qt.Key_Right)
+            equal(gallery.selectedIndex, 1, "navigation stops at the last still")
+            keyClick(Qt.Key_Left)
+            equal(gallery.selectedIndex, 0, "left arrow shows the previous still")
+            keyClick(Qt.Key_Escape)
+            assertOk(gallery.selectedIndex === -1 && panel.showingMotion, "Esc closes the viewer first")
+            keyClick(Qt.Key_Escape)
+            assertOk(!panel.showingMotion, "second Esc returns to live view")
+            panel.close()
+            panel.configured = false
+            console.log("PASS: gallery empty state, grid, plain captions, viewer navigation and Esc")
+        }
         function runDualView() {
             panel.close()
             var first = {id: "first", name: "<b>Front door</b>", url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
@@ -140,6 +259,13 @@ ShellRoot {
             parent = popup.contentItem[0]
             eventually(function() { return primary.live && secondary.live }, 5000)
             equal(state().viewMode, "dual", "two-camera mode is the default")
+            equal(primary.statusColor.toString(), "#30d158", "live tile shows a green status dot")
+            for (var tile of [primary, secondary]) {
+                var tileFrame = find(tile, function(i) { return i.objectName === "videoFrame" })
+                assertOk(Math.abs(tileFrame.width / tileFrame.height - tile.aspect) < 0.02, "tile frame keeps the stream aspect")
+            }
+            var pill = find(primary, function(i) { return i.objectName === "feedNamePill" })
+            assertOk(pill.visible, "dual tiles label their camera")
             equal(grid.columns, 2, "wide viewer places cameras side by side")
             assertOk(Math.abs(primary.width - secondary.width) < 1 && primary.x < secondary.x, "tiles have equal width")
             var name = find(primary, function(i) { return i.objectName === "feedName" })
@@ -199,10 +325,14 @@ ShellRoot {
             panel.submitProfile()
             eventually(function() { return panel.cameras.length === 1 && !panel.configuring }, 4000)
             var offlineOverlay = field("videoOverlay")
+            var offlineFeed = field("primaryFeed")
             assertOk(offlineOverlay.item !== null && offlineOverlay.width > 0 && offlineOverlay.height > 0,
-                "offline feed displays corner borders before its first video frame")
-            equal(find(offlineOverlay.item, function(i) { return i.objectName === "overlayCorner" }).color.toString(),
-                "#ff4545", "offline camera shows red corner borders")
+                "offline feed keeps overlay geometry before its first video frame")
+            equal(find(offlineOverlay.item, function(i) { return i.objectName === "overlayCorner" }) !== null,
+                panel.overlayStyle !== "default", "only Coder and Hackerman draw corner brackets")
+            eventually(function() { return offlineFeed.connectionState === "offline" }, 4000)
+            equal(offlineFeed.statusColor.toString(), "#ff453a", "offline camera shows a red status dot")
+            equal(field("headerStatusDot").color.toString(), "#ff453a", "toolbar dot mirrors the offline state")
             capture(content, "offline-feed")
             var firstId = panel.selectedCameraId
             panel.editSettings(true)
@@ -231,6 +361,18 @@ ShellRoot {
             eventually(function() { return panel.selectedCameraId === firstId }, 4000)
             assertOk(!panel.configuring, "main selector switches feed without opening settings")
             equal(selector.displayText, "Front door", "selector updates after switch")
+            panel.pinned = true
+            mouseMove(selector, 20, selector.height / 2)
+            wait(250)
+            mouseClick(selector)
+            eventually(function() { return selector.popup.opened }, 1000)
+            var addEntry = find(selector.popup.contentItem, function(i) { return i.objectName === "menuAddCamera" })
+            assertOk(addEntry !== null && addEntry.visible, "camera menu offers Add Camera")
+            mouseClick(addEntry)
+            eventually(function() { return panel.configuring && panel.editingCameraId === "" && !selector.popup.visible }, 1000)
+            equal(field("viewModeControl").currentIndex, -1, "Live/Motion control shows no selection in settings")
+            mouseClick(find(field("viewModeControl"), function(i) { return i.objectName === "liveButton" }))
+            assertOk(!panel.configuring, "Live segment leaves settings")
             panel.editSettings()
             assertOk(field("addCameraButton").visible, "add button is in Config")
             panel.selectCamera(1)
@@ -303,22 +445,26 @@ ShellRoot {
             assertOk(overlayChooser !== null && overlay !== null, "theme editor offers overlays")
             equal(overlayChooser.model[2], "Hackerman", "overlay chooser uses the Hackerman name")
             equal(overlay.mode, "default", "first run uses Default overlay")
-            assertOk(overlay.item !== null, "Default draws corner borders")
+            assertOk(overlay.item !== null, "Default overlay keeps its geometry loaded")
             assertOk(!editor.visible, "theme editor starts hidden")
             var fullHeight = effect.height, beforeFrames = panel.framesReceived
             click(themeButton)
             wait(150)
             assertOk(editor.visible && !panel.configuring && state().live, "theme button opens editor while video plays")
-            assertOk(effect.height >= 120 && effect.height < fullHeight, "editor leaves space for live feed")
-            assertOk(editor.y >= effect.parent.y + effect.parent.height, "theme section sits below video")
+            assertOk(effect.height >= 120, "video stays visible while the inspector is open")
+            var inspectorScroll = find(editor, function(i) { return i.contentHeight !== undefined && i.availableHeight !== undefined })
+            assertOk(inspectorScroll.contentHeight <= inspectorScroll.availableHeight + 1, "inspector grows the card instead of scrolling")
+            assertOk(editor.mapToItem(content, 0, 0).y >= effect.mapToItem(content, 0, effect.height).y,
+                "appearance inspector sits below video")
             equal(panel.videoStyle, "theme", "first run uses theme tint")
             assertOk(!pixelSize.visible && strength.visible, "default theme tint shows strength slider")
-            click(chooser)
-            wait(100)
-            assertOk(chooser.popup.visible, "video style dropdown opens")
-            var choice = find(chooser.popup.contentItem, function(i) { return i.text === "Omarchy Pixel" && i.clicked !== undefined })
-            assertOk(choice !== null, "Omarchy Pixel is available in dropdown")
+            equal(chooser.model.length, 4, "segmented control lists the four video styles")
+            var choice = find(chooser, function(i) { return i.text === "Omarchy Pixel" && i.clicked !== undefined })
+            assertOk(choice !== null, "Omarchy Pixel is a segment")
             click(choice)
+            equal(chooser.currentIndex, 3, "clicking a segment selects it")
+            var thumb = find(chooser, function(i) { return i.objectName === "segmentThumb" })
+            eventually(function() { return Math.abs(thumb.x - choice.mapToItem(chooser, 0, 0).x) < 1 }, 1000)
             assertOk(strength.visible && pixelSize.visible, "Omarchy Pixel shows both sliders")
             equal(pixelSize.value, 3, "default preserves previous pixel look")
             pixelSize.value = 8; strength.value = 60
@@ -420,7 +566,9 @@ ShellRoot {
                 }
                 capture(content, "profile-" + profile)
             }
-            equal(effect.parent.border.color.toString(), Commons.Color.accent.toString(), "video frame follows theme accent")
+            assertOk(effect.parent.layer.enabled && effect.parent.objectName === "videoFrame", "video is clipped to a rounded frame")
+            var hairline = find(content, function(i) { return i.objectName === "videoHairline" })
+            assertOk(hairline !== null && hairline.radius >= 10, "rounded hairline outlines the video")
             equal(effect.style, "theme-pixel", "applied effect remains after editor hides")
             click(themeButton)
             equal(chooser.currentIndex, 3, "reopening loads saved style")
@@ -432,6 +580,11 @@ ShellRoot {
             assertOk(pixelSize.visible && !strength.visible, "Pixel shows only pixel size")
             chooser.currentIndex = 1
             assertOk(!pixelSize.visible && strength.visible, "Omarchy shows only tint strength")
+            click(field("cancelStyle"))
+            assertOk(!editor.visible, "Cancel dismisses the inspector")
+            equal(effect.style, "theme-pixel", "Cancel restores applied appearance")
+            click(themeButton)
+            chooser.currentIndex = 2
             click(themeButton)
             assertOk(!editor.visible, "theme button can dismiss editor")
             equal(effect.style, "theme-pixel", "dismissal restores applied appearance")
@@ -521,8 +674,8 @@ ShellRoot {
             var original = grabImage(fixture)
             fixtureOverlay.mode = "default"; fixtureOverlay.active = true
             wait(100)
-            var corner = find(fixtureOverlay.item, function(i) { return i.objectName === "overlayCorner" })
-            equal(corner.color.toString(), "#ff4545", "offline corners are red")
+            assertOk(find(fixtureOverlay.item, function(i) { return i.objectName === "overlayCorner" }) === null,
+                "Default has no corner brackets")
             assertOk(find(fixtureOverlay.item, function(i) { return i.objectName === "overlayActivityDot" }) === null,
                 "Default has no activity dots")
             assertOk(!find(fixtureOverlay.item, function(i) { return i.objectName === "terminalScanBand" }).visible,
@@ -531,11 +684,15 @@ ShellRoot {
             wait(200)
             equal(fixtureOverlay.item.tick, defaultTick, "Default needs no terminal animation clock")
             fixtureOverlay.live = true
-            equal(corner.color.toString(), Commons.Color.accent.toString(), "connected corners use theme accent")
             var defaultImage = grabImage(fixture)
+            assertOk(original.equals(defaultImage), "Default leaves the video unobstructed")
             capture(fixture, "overlay-default")
-            fixtureOverlay.mode = "coder"
+            fixtureOverlay.mode = "coder"; fixtureOverlay.live = false
             wait(150)
+            var corner = find(fixtureOverlay.item, function(i) { return i.objectName === "overlayCorner" })
+            equal(corner.color.toString(), "#ff4545", "Coder offline corners are red")
+            fixtureOverlay.live = true
+            equal(corner.color.toString(), Commons.Color.accent.toString(), "Coder connected corners use theme accent")
             var hudImage = grabImage(fixture)
             assertOk(!defaultImage.equals(hudImage), "Coder adds right-side activity dots")
             assertOk(find(fixtureOverlay.item, function(i) { return i.objectName === "overlayActivityDot" }) !== null,
@@ -570,9 +727,15 @@ ShellRoot {
             mouseClick(wave)
             equal(audioRequests, 0, "disabled waveform cannot request audio playback")
             wave.clicked.disconnect(onAudioRequest)
+            var mutedTick = wave.tick
+            wait(250)
+            equal(wave.tick, mutedTick, "level bars rest while there is no sound")
+            wave.audioAvailable = true; wave.audioMuted = false
+            wait(250)
             var waveImage = grabImage(wave)
             wait(250)
-            assertOk(!waveImage.equals(grabImage(wave)), "decorative waveform animates")
+            assertOk(!waveImage.equals(grabImage(wave)), "level bars animate while audio plays")
+            assertOk(wave.width > wave.height, "speaker button widens to show level bars")
             wave.visible = false
             var waveTick = wave.tick
             wait(200)
@@ -624,9 +787,10 @@ ShellRoot {
             fixtureOverlay.active = false
             wait(100)
             assertOk(fixtureOverlay.item === null && original.equals(grabImage(fixture)), "inactive overlay releases geometry")
+            wave.audioAvailable = false; wave.audioMuted = true
             fixtureOverlay.mode = "default"; fixtureOverlay.active = true
             wait(100)
-            assertOk(fixtureOverlay.item !== null && !original.equals(grabImage(fixture)), "Default restores corner borders")
+            assertOk(fixtureOverlay.item !== null && original.equals(grabImage(fixture)), "Default reloads without decorations")
             fixtureOverlay.active = false
             effectWindow.visible = false
             console.log("PASS: Default/Coder/Hacker pixels, continuous sweep, decorative waveform, frame counter, hidden pause, palette binding, overlay cleanup")

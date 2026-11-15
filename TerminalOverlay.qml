@@ -77,8 +77,10 @@ Item {
         color: "transparent"
         border.color: Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.35)
     }
+    // Corner brackets belong to the Coder and Hackerman looks; the plain
+    // Default view shows connection state with the feed's status dot instead.
     Repeater {
-        model: 4
+        model: root.profile !== "default" ? 4 : 0
         Item {
             required property int index
             readonly property bool rightSide: index % 2 === 1

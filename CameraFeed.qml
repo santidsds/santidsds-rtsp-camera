@@ -3,13 +3,17 @@ import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import QtMultimedia
+import QtQuick.Effects
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 
 // One player and recovery loop per tile: a stalled camera cannot stop its peer.
-Rectangle {
+// The visible tile hugs the stream's aspect ratio, so the rounded video is the
+// tile itself rather than a letterboxed box.
+Item {
     id: root
+    AppleStyle { id: ui }
     Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
     property var camera: ({url: "", username: "", password: ""})
     property bool streaming: false
@@ -28,6 +32,14 @@ Rectangle {
     readonly property bool live: streaming && frameWatchdog.running
         && player.playbackState === MediaPlayer.PlayingState
     readonly property string sourceUrl: streamUrl()
+    readonly property bool connecting: streaming && !live && !reconnectTimer.running
+    readonly property string connectionState: !streaming ? "idle" : live ? "live"
+        : reconnectTimer.running ? "offline" : "connecting"
+    readonly property color statusColor: connectionState === "live" ? ui.systemGreen
+        : connectionState === "offline" ? ui.systemRed
+        : connectionState === "connecting" ? ui.systemOrange : ui.tertiaryLabel
+    // Last known stream shape; kept across reconnects so the tile doesn't jump.
+    property real aspect: 16 / 9
     signal audioRequested()
     signal fullscreenRequested()
 
@@ -154,141 +166,252 @@ Rectangle {
         }
     }
 
-    color: "#080b10"
-    border.width: 1
-    border.color: Commons.Color.accent
-    clip: true
-    VideoOutput {
-        id: video
-        anchors.fill: parent
-        anchors.margins: 1
-        fillMode: VideoOutput.PreserveAspectFit
-    }
-    VideoEffect {
-        objectName: "videoEffect"
-        anchors.fill: video
-        sourceItem: video
-        active: root.streaming
-        style: root.videoStyle
-        strength: root.tintStrength / 100
-        pixelSize: root.pixelSize
-    }
-    // Keep controls readable over both light and dark video.
-    Rectangle {
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.margins: 1
-        height: 88
-        gradient: Gradient {
-            GradientStop { position: 0; color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0) }
-            GradientStop { position: 1; color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.75) }
-        }
-    }
-    VideoOverlay {
-        id: cameraOverlay
-        objectName: "videoOverlay"
-        x: video.x + (video.contentRect.width > 0 ? video.contentRect.x : 0)
-        y: video.y + (video.contentRect.height > 0 ? video.contentRect.y : 0)
-        width: video.contentRect.width > 0 ? video.contentRect.width : video.width
-        height: video.contentRect.height > 0 ? video.contentRect.height : video.height
-        active: root.streaming
-        mode: root.overlayStyle
-        cameraName: root.camera.name || "Camera"
-        live: root.live
-        framesReceived: root.framesReceived
-        rightHeaderSpace: audioWaveform.width + 8
-    }
-    AudioWaveform {
-        id: audioWaveform
-        objectName: "audioButton"
-        readonly property real videoWidth: cameraOverlay.width > 0 ? cameraOverlay.width : video.width
-        x: (cameraOverlay.width > 0 ? cameraOverlay.x : video.x)
-            + videoWidth - feedControls.sideInset - width
-        y: (cameraOverlay.height > 0 ? cameraOverlay.y : video.y) + feedControls.overlayInset + 8
-        width: Math.min(104, Math.max(0, videoWidth - feedControls.sideInset * 2) * 0.3)
-        audioAvailable: root.streaming && player.hasAudio
-        audioMuted: cameraAudio.muted
-        onClicked: root.audioRequested()
-    }
-    Label {
-        textFormat: Text.PlainText
+    Item {
+        id: frame
+        objectName: "videoFrame"
         anchors.centerIn: parent
-        width: parent.width - 48
-        text: root.playbackMessage
-        visible: text !== ""
-        color: "white"
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.WordWrap
-        horizontalAlignment: Text.AlignHCenter
-        padding: 12
-        background: Rectangle { color: "#dd080b10"; radius: 8 }
-    }
-    Label {
-        textFormat: Text.PlainText
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: feedControls.top
-        anchors.leftMargin: 12
-        anchors.rightMargin: 12
-        anchors.bottomMargin: 6
-        text: root.message
-        visible: text !== ""
-        color: "#ffd2d2"
-        wrapMode: Text.WordWrap
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-    }
-    RowLayout {
-        id: feedControls
-        readonly property real overlayInset: cameraOverlay.item && cameraOverlay.item.inset !== undefined
-            ? cameraOverlay.item.inset : 0
-        readonly property real sideInset: Math.max(12, overlayInset + 6)
-        anchors.left: cameraOverlay.width > 0 ? cameraOverlay.left : video.left
-        anchors.right: cameraOverlay.width > 0 ? cameraOverlay.right : video.right
-        anchors.bottom: cameraOverlay.height > 0 ? cameraOverlay.bottom : video.bottom
-        anchors.leftMargin: sideInset
-        anchors.rightMargin: sideInset
-        anchors.bottomMargin: overlayInset + 12
-        spacing: 6
-        Item { Layout.fillWidth: true }
-        FeedButton {
-            objectName: "fullscreenButton"
-            text: "⛶"
-            font.family: "JetBrainsMono Nerd Font"
-            Accessible.name: root.fullscreen ? "Exit fullscreen" : root.compact ? strings.t("feed.enlarge") : "Fullscreen"
-            tipText: root.fullscreen ? "Exit fullscreen" : root.compact ? strings.t("feed.enlarge") : "Fullscreen"
-            checked: root.fullscreen
-            onClicked: root.fullscreenRequested()
-            PointerArea {}
+        width: Math.max(1, Math.min(root.width, root.height * root.aspect))
+        height: Math.max(1, width / root.aspect)
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            maskEnabled: true
+            maskSource: frameMask
+            maskThresholdMin: 0.5
+            maskSpreadAtMin: 1.0
+        }
+        Rectangle {
+            anchors.fill: parent
+            color: "#0e0e10"
+        }
+        Text {
+            anchors.centerIn: parent
+            visible: !root.receivedFrame && root.playbackMessage === ""
+            textFormat: Text.PlainText
+            text: ui.iconCamera
+            font.family: ui.iconFont
+            font.pixelSize: Math.min(56, frame.height / 4)
+            color: Qt.rgba(1, 1, 1, 0.08)
+        }
+        VideoOutput {
+            id: video
+            anchors.fill: parent
+            fillMode: VideoOutput.PreserveAspectFit
+            onSourceRectChanged: {
+                if (sourceRect.width > 0 && sourceRect.height > 0)
+                    root.aspect = Math.max(0.5, Math.min(3.5, sourceRect.width / sourceRect.height))
+            }
+        }
+        VideoEffect {
+            objectName: "videoEffect"
+            anchors.fill: video
+            sourceItem: video
+            active: root.streaming
+            style: root.videoStyle
+            strength: root.tintStrength / 100
+            pixelSize: root.pixelSize
+        }
+        // Soft scrims keep glass controls legible over bright video.
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: Math.min(72, parent.height / 3)
+            gradient: Gradient {
+                GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0) }
+                GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0.32) }
+            }
+        }
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: Math.min(56, parent.height / 4)
+            gradient: Gradient {
+                GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0.22) }
+                GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0) }
+            }
+        }
+        VideoOverlay {
+            id: cameraOverlay
+            objectName: "videoOverlay"
+            x: video.contentRect.width > 0 ? video.contentRect.x : 0
+            y: video.contentRect.height > 0 ? video.contentRect.y : 0
+            width: video.contentRect.width > 0 ? video.contentRect.width : video.width
+            height: video.contentRect.height > 0 ? video.contentRect.height : video.height
+            active: root.streaming
+            mode: root.overlayStyle
+            cameraName: root.camera.name || "Camera"
+            live: root.live
+            framesReceived: root.framesReceived
+            rightHeaderSpace: audioWaveform.width + 8
+        }
+        AudioWaveform {
+            id: audioWaveform
+            objectName: "audioButton"
+            x: cameraOverlay.x + cameraOverlay.width - feedControls.sideInset - width
+            y: cameraOverlay.y + feedControls.overlayInset + 10
+            audioAvailable: root.streaming && player.hasAudio
+            audioMuted: cameraAudio.muted
+            onClicked: root.audioRequested()
+        }
+        // Connection progress: a glass capsule with a spinner while connecting.
+        Rectangle {
+            objectName: "playbackMessage"
+            anchors.centerIn: parent
+            visible: root.playbackMessage !== ""
+            width: Math.min(parent.width - 32, messageRow.implicitWidth + 28)
+            height: messageRow.implicitHeight + 16
+            radius: height / 2
+            color: ui.glass
+            border.width: 1
+            border.color: ui.glassBorder
+            Row {
+                id: messageRow
+                anchors.centerIn: parent
+                width: Math.min(implicitWidth, parent.width - 28)
+                spacing: 8
+                Text {
+                    id: spinner
+                    visible: root.connecting
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: ui.iconLoading
+                    font.family: ui.iconFont
+                    font.pixelSize: 14
+                    color: "white"
+                    RotationAnimator on rotation {
+                        running: spinner.visible && root.visible
+                        from: 0; to: 360
+                        duration: 900
+                        loops: Animation.Infinite
+                    }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.min(implicitWidth, messageRow.parent.width - 28 - (spinner.visible ? spinner.width + 8 : 0))
+                    textFormat: Text.PlainText
+                    text: root.playbackMessage
+                    font.family: ui.font
+                    font.pixelSize: ui.callout
+                    font.weight: Font.Medium
+                    color: "white"
+                    elide: Text.ElideRight
+                }
+            }
+        }
+        Rectangle {
+            anchors.left: parent.left
+            anchors.bottom: parent.bottom
+            anchors.leftMargin: feedControls.sideInset
+            anchors.bottomMargin: feedControls.overlayInset + 12
+            visible: root.message !== ""
+            width: Math.min(errorText.implicitWidth + 24, parent.width - feedControls.sideInset * 2 - 48)
+            height: errorText.implicitHeight + 12
+            radius: 8
+            color: ui.glass
+            border.width: 1
+            border.color: ui.alpha(ui.systemRed, 0.5)
+            Text {
+                id: errorText
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                textFormat: Text.PlainText
+                text: root.message
+                font.family: ui.font
+                font.pixelSize: ui.callout
+                color: "#ffd0cc"
+                elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
+            }
+        }
+        RowLayout {
+            id: feedControls
+            readonly property real overlayInset: cameraOverlay.item && cameraOverlay.item.inset !== undefined
+                && root.overlayStyle !== "default" ? cameraOverlay.item.inset : 0
+            readonly property real sideInset: Math.max(12, overlayInset + 6)
+            anchors.left: cameraOverlay.left
+            anchors.right: cameraOverlay.right
+            anchors.bottom: cameraOverlay.bottom
+            anchors.leftMargin: sideInset
+            anchors.rightMargin: sideInset
+            anchors.bottomMargin: overlayInset + 12
+            spacing: 6
+            Item { Layout.fillWidth: true }
+            FeedButton {
+                objectName: "fullscreenButton"
+                text: root.fullscreen ? ui.iconFullscreenExit : ui.iconFullscreen
+                Accessible.name: tipText
+                tipText: root.fullscreen ? "Exit Full Screen" : root.compact ? strings.t("feed.enlarge") : "Enter Full Screen"
+                checked: root.fullscreen
+                onClicked: root.fullscreenRequested()
+            }
+        }
+        // Camera name and connection dot, top-left, when several tiles share the view.
+        Rectangle {
+            objectName: "feedNamePill"
+            visible: root.compact && root.overlayStyle !== "hacker"
+            x: cameraOverlay.x + feedControls.sideInset
+            y: cameraOverlay.y + feedControls.overlayInset + 10
+            width: Math.min(nameRow.implicitWidth + 22, Math.max(0, cameraOverlay.width * 0.6))
+            height: 30
+            radius: height / 2
+            color: ui.glass
+            border.width: 1
+            border.color: ui.glassBorder
+            Row {
+                id: nameRow
+                anchors.left: parent.left
+                anchors.leftMargin: 11
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 7
+                StatusDot {
+                    anchors.verticalCenter: parent.verticalCenter
+                    tone: root.statusColor
+                    pulsing: root.connecting
+                }
+                Text {
+                    objectName: "feedName"
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.min(implicitWidth, Math.max(0, cameraOverlay.width * 0.6 - 40))
+                    textFormat: Text.PlainText
+                    text: root.camera.name || "Camera"
+                    elide: Text.ElideRight
+                    color: "white"
+                    font.family: ui.font
+                    font.pixelSize: ui.callout
+                    font.weight: Font.DemiBold
+                }
+            }
         }
     }
-
-    Label {
-        textFormat: Text.PlainText
-        objectName: "feedName"
-        visible: root.compact && root.overlayStyle !== "hacker"
-        x: cameraOverlay.x + feedControls.sideInset + 2
-        y: cameraOverlay.y + feedControls.overlayInset + 8
-        width: Math.min(implicitWidth, Math.max(0, cameraOverlay.width * 0.55))
-        text: root.camera.name || "Camera"
-        elide: Text.ElideRight
-        color: "white"
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        font.weight: Font.DemiBold
-        padding: 7
-        background: Rectangle { radius: 7; color: "#b3080b10" }
+    Item {
+        id: frameMask
+        anchors.fill: frame
+        visible: false
+        layer.enabled: true
+        Rectangle {
+            anchors.fill: parent
+            radius: ui.videoRadius
+        }
+    }
+    // Hairline edge so dark video still reads as a surface on dark glass.
+    Rectangle {
+        objectName: "videoHairline"
+        anchors.fill: frame
+        radius: ui.videoRadius
+        color: "transparent"
+        border.width: 1
+        border.color: Qt.rgba(1, 1, 1, 0.09)
     }
     component FeedButton: Controls.Button {
         id: feedButton
         property string tipText: ""
-        implicitWidth: 36
-        implicitHeight: 36
+        implicitWidth: 30
+        implicitHeight: 30
         padding: 0
-        font.pixelSize: 18
         hoverEnabled: true
+        focusPolicy: Qt.TabFocus
         PanelToolTip {
             visible: feedButton.hovered && feedButton.tipText !== ""
             text: feedButton.tipText
@@ -296,21 +419,18 @@ Rectangle {
         }
         contentItem: Text {
             textFormat: Text.PlainText
-            text: parent.text
-            font: parent.font
-            color: !feedButton.enabled ? Commons.Color.muted
-                : feedButton.checked || feedButton.hovered || feedButton.activeFocus ? Commons.Color.accent : Commons.Color.foreground
+            text: feedButton.text
+            font.family: ui.iconFont
+            font.pixelSize: 16
+            color: "white"
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
         }
         background: Rectangle {
-            radius: 18
-            color: feedButton.hovered || feedButton.checked
-                ? Qt.rgba(0, 0, 0, 0.35)
-                : Qt.rgba(0, 0, 0, 0.22)
-            border.width: 1
-            border.color: !feedButton.enabled ? Commons.Color.muted
-                : feedButton.checked || feedButton.hovered || feedButton.activeFocus ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.12)
+            radius: width / 2
+            color: feedButton.down ? Qt.rgba(0, 0, 0, 0.7) : feedButton.hovered ? ui.glassHover : ui.glass
+            border.width: feedButton.visualFocus ? 2 : 1
+            border.color: feedButton.visualFocus ? ui.alpha(ui.accent, 0.9) : ui.glassBorder
         }
         PointerArea {}
     }

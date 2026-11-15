@@ -12,20 +12,23 @@ shows RTSP camera feeds in a themed, pinnable card on your desktop.
 - **Bar widget** — camera icon on the right side of the Omarchy bar. Click to
   open the viewer; click again or click outside to close (unless pinned).
 - **Profiles** — save up to 32 cameras (name + RTSP URL + credentials). Switch
-  from the dropdown in the header. The last camera is remembered across
+  from the camera menu in the toolbar. The last camera is remembered across
   monitors.
-- **Viewer** — resizable card (drag corners; double-click to reset). Size and
-  per-monitor pinned position persist under `~/.config/rtsp-camera/`.
+- **Viewer** — resizable card (drag corners; double-click to reset). It fits
+  the video like Picture in Picture. Size and per-monitor pinned position
+  persist under `~/.config/rtsp-camera/`.
 - **Dual view** — shows the selected camera and a second saved camera together.
-  Wide cards place them side by side; narrow cards stack them. **Dual** toggles
+  Wide cards place them side by side; narrow cards stack them. The split-view button toggles
   the individual view. Each tile reconnects independently; audio plays from
   one camera at a time. Use a tile's **⛶** to enlarge it, then Esc to return.
-- **Pin** — switch stays above other windows; drag the empty header to move it.
+- **Pin** — the pin button keeps the card above other windows; drag the empty
+  toolbar to move it.
   Chrome fades when the pointer leaves; hover brings it back. Pin resets on close.
 - **Streaming** — audio starts muted (waveform toggle), auto-reconnect with
-  backoff (2→30s), corner borders go red while offline/connecting. **⛶** is
-  fullscreen (Esc exits).
-- **Themes** — live preview of video styles (Original / Omarchy / Pixel /
+  backoff (2→30s), status dots turn orange while connecting and red while
+  offline. The green window control or a tile's **⛶** enters full screen
+  (Esc exits).
+- **Appearance** — live preview of video styles (Original / Omarchy / Pixel /
   Omarchy Pixel) and overlays (Default / Coder / Hackerman). **Apply** saves
   for every camera; dismissing the section discards unapplied changes.
 - **Motion** — gallery of still frames from the last 24h (see below).
@@ -37,29 +40,28 @@ prefer RTSps if your camera supports it.
 
 ---
 
-## Design changes
+## Design
 
-Camera profiles keep the same settings format. Each visible tile has its own
-player and recovery loop, and both share the existing video appearance settings.
+The viewer follows macOS conventions while keeping the Omarchy theme's
+colors (on a grey theme the accent reads as macOS Graphite). Text uses SF Pro
+when installed, otherwise Inter, otherwise the Omarchy font.
 
-| Area | Change |
+| Area | Design |
 |------|--------|
-| **Header** | Camera selector → **Motion** → **Dual** → **Themes** → **Config** → pill pin switch → round **×** close. Controls use compact symbols in narrow cards. |
-| **Fullscreen** | Only bottom-right **⛶** on the video; removed from the header. |
-| **Themes entry** | First-class **Themes** button in the header (replaces the old palette icon). |
-| **Pill controls** | Motion / Themes / Config / pin use Omarchy `Controls.Button` with rounded hover fills. |
-| **Dropdowns** | Camera, video style, and overlay popups: radius 10/12, themed row hover, caption fonts. |
-| **Labels & status** | Theme editor and messages use Omarchy’s font family and caption sizing. |
-| **Tooltips** | Drag/resize use `PanelToolTip` (subtle shell style), not default Qt chrome. |
-| **Cursors** | `PointerArea` sets the correct pointer on buttons, dropdowns, sliders, gallery tiles. |
-| **Pinned chrome** | Forced visible while a dropdown is open so the popup isn’t cut off against a faded card. |
-| **Motion page** | Gallery is a third stack view (live / config / motion) under the same header. |
+| **Toolbar** | Window controls (red closes, green toggles full screen; yellow is shown disabled, as macOS does for windows that cannot minimize) → camera menu with a status dot → **Live / Motion** segmented control → icon buttons for two-camera view, appearance, settings and keep-on-top. Narrow cards switch the segments to icons. |
+| **Video** | Each tile hugs its stream's aspect ratio with rounded corners and a hairline edge — no letterboxing. Glass controls: speaker button (widens with level bars while audio plays) and full screen. Dual tiles show a name pill with a status dot. |
+| **Status** | Green dot = live, pulsing orange = connecting, red = offline/retrying. Connection messages appear in a glass capsule with a spinner. |
+| **Sizing** | Like Picture in Picture, the live card fits the video: the saved height is an upper bound, and corner drags scale proportionally. The appearance inspector grows the card while open. |
+| **Appearance** | Inspector panel with segmented controls for video style and overlay, macOS sliders, and Cancel / Apply. The Default overlay no longer draws corner brackets (Coder and Hackerman keep them). |
+| **Settings** | Grouped form (Connection, Authentication) with inline fields, a storage footnote, **Delete Camera** (asks to confirm), Cancel and Save. The camera menu also offers **Add Camera…**. |
+| **Motion** | Photos-style grid with rounded thumbnails and time captions, a listener status chip, an empty state, and a full-size viewer with ← / → navigation and Esc. |
+| **Tooltips / cursors** | `PanelToolTip` and `PointerArea`, as before. |
 
 ---
 
 ## Functionality changes
 
-- **Motion still gallery** — `Motion` / `Live` in the header. `motiond.py`
+- **Motion still gallery** — **Live / Motion** in the toolbar. `motiond.py`
   captures via ONVIF PullPoint (HTTP snapshot fallback). Files in
   `~/.local/share/rtsp-camera/motion/` (0700), pruned at **24h** or **400
   files**. Retention/camera in `motion.json` (0600). Optional user unit:
@@ -135,7 +137,7 @@ Update a git install: `omarchy plugin update yani.camera`
 
 ## Themes (video style & overlay)
 
-Open **Themes** from the header. Changes preview live; **Apply** saves for
+Open **Appearance** (palette icon) from the toolbar. Changes preview live; **Apply** saves for
 all cameras/monitors (`appearance.json`). Closing the viewer or opening
 Config discards unapplied edits.
 
@@ -155,7 +157,7 @@ Themed styles add **Tint strength** (0–100%, default 35%). Pixel styles add
 | **Coder** | + activity dots + terminal status / frame counter. |
 | **Hackerman** | + scanlines, sweep band, top header, block cursor. |
 
-Borders are red offline/connecting, accent when frames arrive. Overlays fit
+Coder/Hackerman corner brackets are red offline, accent when frames arrive. Overlays fit
 the video (letterbox untouched), sit under playback controls, and use one GPU
 texture + one shader — no per-frame Python. Needs a working Qt Quick GPU
 backend for filtered styles.
@@ -168,6 +170,7 @@ backend for filtered styles.
 omarchy plugin validate .
 python3 -m unittest discover -s . -p 'test_*.py'
 python3 tests/run_qml_checks.py --ui-only   # layout; full run needs FFmpeg/QtTest
+# Optional: --screen=<output> runs the test surfaces on another (e.g. headless) monitor
 ```
 
 Rebuild the shader after editing `shaders/video.frag`:
