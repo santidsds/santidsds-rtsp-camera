@@ -792,11 +792,18 @@ def dvrip_login_for(config_dir: Path, camera: dict) -> dict | None:
             "user": str(saved.get("user") or ""), "password": str(saved.get("password") or "")}
 
 
-def cmd_set_login(config_dir: Path, ref: str, ask=input, ask_secret=getpass.getpass, client_class=None) -> int:
-    """Prompt for a camera's device login, try it once, and save it (0600) only if it works."""
+def cmd_set_login(config_dir: Path, ref: str, ask=input, ask_secret=getpass.getpass, client_class=None,
+                  copy_from: str = "") -> int:
+    """Try a camera's device login once and save it (0600) only if it works.
+
+    The login is prompted for (password hidden), or copied from another camera
+    with copy_from, so a shared app password works without knowing or typing it.
+    """
     client_class = client_class or DvripClient
     library = load_json(config_dir / "config.json", {"cameras": []})
-    camera = find_camera_ref(library if isinstance(library, dict) else {}, ref)
+    if not isinstance(library, dict):
+        library = {"cameras": []}
+    camera = find_camera_ref(library, ref)
     if not camera:
         names = ", ".join(str(c.get("name")) for c in library.get("cameras") or [] if isinstance(c, dict))
         print(f"No saved camera called {ref!r}. Cameras: {names}")
@@ -810,8 +817,17 @@ def cmd_set_login(config_dir: Path, ref: str, ask=input, ask_secret=getpass.getp
         return 2
     print(f"Device login for {camera.get('name')} ({host}:{DVRIP_PORT}), the account used in the phone app.")
     print("It is tried once; failed tries count toward the camera's lockout.")
-    user = ask("User [admin]: ").strip() or "admin"
-    password = ask_secret("Password (hidden): ")
+    if copy_from:
+        donor = find_camera_ref(library, copy_from)
+        login = dvrip_login_for(config_dir, donor) if donor else None
+        if not login:
+            print(f"No device login known for {copy_from!r}. Nothing tried.")
+            return 2
+        user, password = login["user"], login["password"]
+        print(f"Trying the login of {donor.get('name')} (user {user}).")
+    else:
+        user = ask("User [admin]: ").strip() or "admin"
+        password = ask_secret("Password (hidden): ")
     client = client_class(host, DVRIP_PORT, user, password)
     try:
         client.connect()
@@ -1133,6 +1149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--camera", default="", help="camera id for --once")
     parser.add_argument("--prune-only", action="store_true", help="apply retention and exit")
     parser.add_argument("--set-login", metavar="CAMERA", help="prompt for a camera's device (app) login and save it")
+    parser.add_argument("--same-as", metavar="CAMERA", default="", help="with --set-login: try another camera's login")
     args = parser.parse_args(argv)
     config_dir, motion_dir = base_dirs()
     ensure_dirs(motion_dir)
@@ -1143,7 +1160,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         return cmd_once(config_dir, motion_dir, args.camera)
     if args.set_login:
-        return cmd_set_login(config_dir, args.set_login)
+        return cmd_set_login(config_dir, args.set_login, copy_from=args.same_as)
     if args.prune_only:
         return cmd_prune(config_dir, motion_dir)
     return MotionSupervisor(config_dir, motion_dir).run()

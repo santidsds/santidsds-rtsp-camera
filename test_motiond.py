@@ -347,6 +347,21 @@ class SetLoginTests(unittest.TestCase):
         login = motiond.dvrip_login_for(self.config, {"id": "c2", "url": "rtsp://127.0.0.1:8554/icsee_plugin"})
         self.assertEqual(login["host"], "192.0.2.3")
 
+    def test_copy_login_from_bridge_camera(self):
+        FakeLoginClient.accept = True
+        code = motiond.cmd_set_login(self.config, "Camera 1", ask=None, ask_secret=None,
+                                     client_class=FakeLoginClient, copy_from="Camera 2")
+        self.assertEqual(code, 0)
+        self.assertEqual(FakeLoginClient.tried, [("192.0.2.2", 34567, "admin", "p@ss")])
+        saved = json.loads((self.config / motiond.LOGINS_FILE).read_text())["c1"]
+        self.assertEqual(saved, {"user": "admin", "password": "p@ss"})
+
+    def test_copy_login_from_unknown_camera_tries_nothing(self):
+        code = motiond.cmd_set_login(self.config, "Camera 1", ask=None, ask_secret=None,
+                                     client_class=FakeLoginClient, copy_from="garage")
+        self.assertEqual(code, 2)
+        self.assertEqual(FakeLoginClient.tried, [])
+
     def test_unknown_camera(self):
         self.assertEqual(self.run_set("garage"), 2)
         self.assertEqual(FakeLoginClient.tried, [])
