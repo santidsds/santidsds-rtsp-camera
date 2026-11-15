@@ -80,6 +80,64 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(sdclip.effective_fps(sdclip.XmMedia(codec="hevc", fps=15, frames=30)), 15.0)
 
 
+class StreamingPartsTests(unittest.TestCase):
+    def test_split_in_pieces_matches_split_at_once(self):
+        raw = b"junk" + b"".join(xm(sdclip.VIDEO_I if i % 5 == 0 else sdclip.VIDEO_P, bytes([i]) * (50 + i))
+                                 + xm(sdclip.AUDIO, b"\xd5" * 40, kind=sdclip.G711A) for i in range(30))
+        whole, _ = sdclip.split_frames(raw)
+        pieces, pending = [], bytearray()
+        for start in range(0, len(raw), 37):
+            pending += raw[start:start + 37]
+            frames, used = sdclip.split_frames(bytes(pending), final=False)
+            pieces += frames
+            del pending[:used]
+        frames, _ = sdclip.split_frames(bytes(pending), final=True)
+        pieces += frames
+        self.assertEqual([(f.marker, f.payload) for f in pieces], [(f.marker, f.payload) for f in whole])
+        self.assertEqual(len(whole), 60)
+
+    def test_ts_writer_output_is_valid_and_timed(self):
+        if not shutil.which("ffprobe"):
+            self.skipTest("needs ffprobe")
+        made = make_hevc_stream(seconds=2)
+        if not made:
+            self.skipTest("ffmpeg has no libx265")
+        frames, _ = sdclip.split_frames(made[0])
+        writer, ts, index = sdclip.TsVideoWriter("hevc"), bytearray(), 0
+        for frame in frames:
+            if frame.marker in (sdclip.VIDEO_I, sdclip.VIDEO_P):
+                ts += writer.frame(frame.payload, index / 12)
+                index += 1
+        self.assertEqual(len(ts) % 188, 0)
+        with tempfile.NamedTemporaryFile(suffix=".ts") as out:
+            out.write(ts)
+            out.flush()
+            probe = json.loads(subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
+                                               "stream=codec_name,nb_read_frames:format=duration", "-of", "json", out.name],
+                                              capture_output=True, text=True).stdout)
+        self.assertEqual(probe["streams"][0]["codec_name"], "hevc")
+        self.assertEqual(int(probe["streams"][0]["nb_read_frames"]), index)
+        self.assertAlmostEqual(float(probe["format"]["duration"]), index / 12, delta=0.1)
+
+    def test_day_index_merges_ranges_and_lists_motion(self):
+        day = AT.date()
+        files = [entry(datetime(2026, 11, 14, 23, 58), datetime(2026, 11, 15, 0, 3)),
+                 entry(datetime(2026, 11, 15, 0, 3), datetime(2026, 11, 15, 0, 8)),
+                 entry(datetime(2026, 11, 15, 0, 8, 1), datetime(2026, 11, 15, 0, 8, 30), "M"),
+                 entry(datetime(2026, 11, 15, 9, 0), datetime(2026, 11, 15, 9, 5)),
+                 {"BeginTime": "bad"}]
+        self.assertEqual(sdclip.day_index(files, day), {
+            "ranges": [["00:00:00", "00:08:30"], ["09:00:00", "09:05:00"]],
+            "motion": [["00:08:01", "00:08:30"]]})
+
+    def test_playback_starts_at_the_moment_or_the_next_recording(self):
+        files = [entry(AT - timedelta(minutes=5), AT - timedelta(minutes=1)),
+                 entry(AT + timedelta(minutes=10), AT + timedelta(minutes=15))]
+        self.assertEqual(sdclip.plan_playback(files, AT - timedelta(minutes=2)), AT - timedelta(minutes=2))
+        self.assertEqual(sdclip.plan_playback(files, AT), AT + timedelta(minutes=10))
+        self.assertIsNone(sdclip.plan_playback(files, AT + timedelta(hours=1)))
+
+
 class WindowTests(unittest.TestCase):
     def test_continuous_recording(self):
         files = [entry(AT - timedelta(minutes=2), AT + timedelta(minutes=3))]
@@ -217,6 +275,12 @@ class FakeCamera:
                 conn.sendall(packet(1001, self.body({"Ret": ret, "SessionID": "0x00000007"}), version=0))
                 if self.refuse:
                     return
+            elif msg == 1020:
+                conn.sendall(packet(1021, self.body({"Ret": 100, "StorageInfo": [{"Partition": [
+                    {"OldStartTime": "2026-11-13 08:00:00", "NewEndTime": "2026-11-15 16:50:00"},
+                    {"OldStartTime": "0000-00-00 00:00:00", "NewEndTime": "0000-00-00 00:00:00"}]}]})))
+            elif msg == motiond.DVRIP_KEEPALIVE:
+                conn.sendall(packet(1007, self.body({"Ret": 100})))
             elif msg == sdclip.FILE_QUERY:
                 conn.sendall(packet(1441, self.body({"Ret": 100, "OPFileQuery": self.files})))
             elif msg == sdclip.PLAYBACK_CLAIM:
@@ -297,6 +361,43 @@ class FetchTests(unittest.TestCase):
         again = self.fetch()
         self.assertTrue(again["cached"])
         self.assertEqual(self.camera.logins, 1, "cached clip needs no second login")
+
+    def test_index_lists_days_and_the_day(self):
+        self.start(files=self.recording() + [entry(AT, AT + timedelta(seconds=20), "M")])
+        result = sdclip.recording_index(self.config, "c2", AT.date(), root=self.cache)
+        self.assertEqual(result["days"], ["2026-11-15", "2026-11-14", "2026-11-13"])
+        self.assertEqual(result["date"], "2026-11-15")
+        self.assertEqual(result["ranges"], [["16:42:45", "16:43:45"]])
+        self.assertEqual(result["motion"], [["16:43:15", "16:43:35"]])
+
+    def test_playback_streams_everything_with_audio_and_stops_the_camera(self):
+        self.start(stream=self.stream, files=self.recording())
+        said = []
+        result = {}
+
+        def run():
+            result["value"] = sdclip.stream_playback(self.config, "c2", AT, said.append, root=self.cache)
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        deadline = time.time() + 10
+        while not said and time.time() < deadline:
+            time.sleep(0.05)
+        url = said[0]["url"]
+        self.assertRegex(url, r"^http://127\.0\.0\.1:\d+/[A-Za-z0-9_-]{20,}\.ts$")
+        self.assertEqual(said[0]["start"], AT.strftime(sdclip.TIME_FORMAT))
+        wrong = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                url.rsplit("/", 1)[0] + "/guess.ts"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(wrong.stdout, "404", "only the private token is served")
+        probe = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
+                                "stream=codec_type,nb_read_frames", "-of", "json", url],
+                               capture_output=True, text=True, timeout=30)
+        streams = {s["codec_type"]: s for s in json.loads(probe.stdout)["streams"]}
+        self.assertEqual(int(streams["video"]["nb_read_frames"]), self.frames)
+        self.assertIn("audio", streams)
+        thread.join(10)
+        self.assertTrue(result["value"]["ended"])
+        self.assertEqual((self.camera.claims, self.camera.stops), (1, 1))
+        self.assertFalse(any(p.suffix == ".mp4" for p in self.cache.rglob("*")), "nothing written to disk")
 
     def test_refused_login_is_tried_once_then_cools_down(self):
         self.start(stream=self.stream, files=self.recording(), refuse=True)
