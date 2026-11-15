@@ -140,13 +140,6 @@ def find_camera(library, camera_id: str):
     return None
 
 
-def camera_host(url: str) -> str:
-    host = urlsplit(url).hostname
-    if not host:
-        raise ValueError("camera URL has no host")
-    return host
-
-
 def extract_path_credentials(url: str) -> tuple[str, str]:
     """Parse XM-style user=NAME_password=PASS_ fragments in the RTSP path."""
     split = urlsplit(url)
@@ -778,7 +771,7 @@ def find_camera_ref(library, ref: str):
     return None
 
 
-def camera_host(config_dir: Path, camera: dict) -> str:
+def device_host(config_dir: Path, camera: dict) -> str:
     """The camera's own address, following a local relay (rtsp://127.0.0.1:8554/<name>)."""
     url = camera.get("url") or ""
     upstream = resolve_bridge_source(config_dir, url)
@@ -791,7 +784,7 @@ def dvrip_login_for(config_dir: Path, camera: dict) -> dict | None:
     source = motion_source(config_dir, camera)
     if source["kind"] == "dvrip":
         return {key: source[key] for key in ("host", "port", "user", "password")}
-    host = camera_host(config_dir, camera)
+    host = device_host(config_dir, camera)
     logins = load_json(config_dir / LOGINS_FILE, {})
     saved = logins.get(camera.get("id")) if isinstance(logins, dict) else None
     if not isinstance(saved, dict) or not host or host in LOOPBACK_HOSTS:
@@ -819,7 +812,7 @@ def cmd_set_login(config_dir: Path, ref: str, ask=input, ask_secret=getpass.getp
     if motion_source(config_dir, camera)["kind"] == "dvrip":
         print(f"{camera.get('name')} already uses the login from the local bridge; nothing to do.")
         return 0
-    host = camera_host(config_dir, camera)
+    host = device_host(config_dir, camera)
     if not host:
         print(f"{camera.get('name')} has no reachable host in its URL.")
         return 2
