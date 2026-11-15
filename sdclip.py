@@ -14,7 +14,7 @@ prunes itself, and --save copies one to your Videos folder.
       {"ok": true, "path": "<saved copy>"}
 
 Error codes: unsupported, login, unreachable, no-recording, timeout, empty,
-busy, ffmpeg, bad-request, failed.
+busy, ffmpeg, bad-request, cancelled, failed.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -40,7 +41,11 @@ AFTER_SEC = 20            # minimum length after the still
 MAX_SPAN_SEC = 90         # longest clip
 MAX_BYTES = 64 * 1024 * 1024
 DEADLINE_SEC = 75         # whole download
-PACKET_TIMEOUT_SEC = 15   # one silent gap from the camera
+PACKET_TIMEOUT_SEC = 10   # one silent gap from the camera
+# Gentle on weak cameras: an X2C-WQ on Wi-Fi choked and rebooted when flooded.
+# ~3x the recording bitrate, so a 25 s clip takes about 8 s.
+RATE_LIMIT_BYTES = 320 * 1024   # per second
+RECEIVE_BUFFER = 64 * 1024
 CACHE_MAX_AGE_SEC = 24 * 3600
 CACHE_MAX_BYTES = 400 * 1024 * 1024
 PART_MAX_AGE_SEC = 3600
@@ -322,6 +327,7 @@ def download(client, reader: PacketReader, start: datetime, end: datetime,
     data, complete, reported = bytearray(), False, 0
     client.sock.settimeout(PACKET_TIMEOUT_SEC)
     client.send(PLAYBACK, body("DownloadStart"))
+    began = time.monotonic()
     try:
         while time.monotonic() < deadline and len(data) < max_bytes:
             msg, payload = reader.packet()
@@ -333,6 +339,9 @@ def download(client, reader: PacketReader, start: datetime, end: datetime,
                 if progress and len(data) - reported >= 256 * 1024:
                     reported = len(data)
                     progress(reported)
+                ahead = len(data) / RATE_LIMIT_BYTES - (time.monotonic() - began)
+                if ahead > 0:
+                    time.sleep(min(ahead, max(0.0, deadline - time.monotonic())))
             elif msg == PLAYBACK + 1 and payload[:1] == b"{":
                 if motiond.dvrip_json(payload).get("Ret") not in OK_CODES:
                     raise ClipError("no-recording")
@@ -423,6 +432,7 @@ def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None
             return done(True)
         deadline = time.monotonic() + DEADLINE_SEC
         client = client_class(login["host"], login["port"], login["user"], login["password"], timeout=10)
+        client.receive_buffer = RECEIVE_BUFFER
         try:
             try:
                 client.connect()  # one attempt: failures count toward the camera's lockout
@@ -484,8 +494,15 @@ def emit(data: dict):
     print(json.dumps(data), flush=True)
 
 
+def _cancel(signum, frame):  # noqa: ARG001
+    # Unwind normally so the camera is told to stop sending (see download()).
+    raise ClipError("cancelled")
+
+
 def main(argv=None) -> int:
     os.umask(0o077)
+    signal.signal(signal.SIGTERM, _cancel)
+    signal.signal(signal.SIGINT, _cancel)
     parser = argparse.ArgumentParser(description="Fetch a clip from a camera's SD card.")
     parser.add_argument("--camera", required=True)
     parser.add_argument("--at")

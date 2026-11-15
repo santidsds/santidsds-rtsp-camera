@@ -7,6 +7,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -285,6 +286,35 @@ class FetchTests(unittest.TestCase):
             result = self.fetch()
         self.assertTrue(result["ok"] and result["partial"])
         self.assertEqual(self.camera.stops, 1, "download stopped even after a stall")
+
+    def test_download_is_paced(self):
+        self.start(stream=self.stream, files=self.recording())
+        began = time.monotonic()
+        with mock.patch.object(sdclip, "RATE_LIMIT_BYTES", 16 * 1024):
+            self.assertTrue(self.fetch()["ok"])
+        self.assertGreater(time.monotonic() - began, len(self.stream) / (16 * 1024) * 0.8)
+
+    def test_cancelling_tells_the_camera_to_stop(self):
+        self.start(stream=self.stream, files=self.recording(), stall_after=2)
+        env = dict(os.environ, XDG_CONFIG_HOME=str(self.config.parent / "xdg"), XDG_CACHE_HOME=str(self.cache))
+        (self.config.parent / "xdg").mkdir()
+        (self.config.parent / "xdg" / "rtsp-camera").symlink_to(self.config)
+        process = subprocess.Popen([sys.executable, str(Path(sdclip.__file__)), "--camera", "c2",
+                                    "--at", AT.strftime(sdclip.TIME_FORMAT)], env=env,
+                                   stdout=subprocess.PIPE, text=True)
+        deadline = time.time() + 10
+        while self.camera.claims == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.3)
+        process.terminate()
+        out, _ = process.communicate(timeout=10)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]), {"ok": False, "error": "cancelled"})
+        deadline = time.time() + 5
+        while self.camera.stops == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.camera.stops, 1)
+        self.assertEqual([p.name for p in (self.cache / "rtsp-camera" / "clips" / "c2").iterdir()], [".lock"],
+                         "no partial files left")
 
     def test_second_fetch_while_one_runs_is_busy(self):
         self.start(stream=self.stream, files=self.recording())

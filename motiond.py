@@ -667,13 +667,30 @@ class DvripClient:
         self.sequence = 0
         self.alive_interval = 20
         self.pending_alarms = []
+        self.receive_buffer = 0  # bytes; 0 keeps the system default
 
     @property
     def session_id(self) -> str:
         return "0x%08X" % self.session
 
+    def _open_socket(self) -> socket.socket:
+        if not self.receive_buffer:
+            return socket.create_connection((self.host, self.port), timeout=self.timeout)
+        # A small receive buffer must be set before connecting; it caps how far
+        # ahead a camera can send, so a slow reader paces a slow camera.
+        family, kind, proto, _, address = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)[0]
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.receive_buffer)
+            sock.settimeout(self.timeout)
+            sock.connect(address)
+        except OSError:
+            sock.close()
+            raise
+        return sock
+
     def connect(self):
-        self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        self.sock = self._open_socket()
         self.send(DVRIP_LOGIN, {"EncryptType": "MD5", "LoginType": "DVRIP-Web",
                                 "PassWord": sofia_hash(self.password), "UserName": self.user})
         _, reply = self.recv_reply(DVRIP_LOGIN + 1)
