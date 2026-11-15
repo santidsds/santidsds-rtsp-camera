@@ -106,7 +106,7 @@
     "other": "%1 days on the card"
   },
   "recordings.loading": "Reading the SD card…",
-  "recordings.hint": "Tap the timeline or a motion event to play.",
+  "recordings.hint": "Click the timeline or a motion event to play.",
   "recordings.empty": "No recordings on this day.",
   "recordings.connecting": "Loading from the SD card…",
   "recordings.ended": "End of this day's recordings.",
@@ -114,15 +114,16 @@
   "recordings.nextMotion": "Next motion (↓)",
   "recordings.back10": "Back 10 s (←)",
   "recordings.forward10": "Forward 10 s (→)",
-  "recordings.prevHour": "Previous hour",
-  "recordings.nextHour": "Next hour",
+  "recordings.prevHour": "Previous hour (,)",
+  "recordings.nextHour": "Next hour (.)",
   "recordings.motionCount": {
-    "one": "%1 motion",
-    "other": "%1 motions"
+    "one": "%1 event",
+    "other": "%1 events"
   },
-  "recordings.noMotion": "No motion",
+  "recordings.noMotion": "No motion events",
   "recordings.error.noRecording": "Nothing recorded from that moment on this day.",
   "recordings.error.unsupported": "This camera can't browse its SD card here.",
   "recordings.error.failed": "Couldn't read the SD card.",
-  "recordings.speed": "Play at %1× speed"
+  "recordings.speed": "Play at %1× speed",
+  "recordings.connectingAt": "Loading %1 from the SD card…"
 }

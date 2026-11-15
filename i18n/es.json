@@ -106,7 +106,7 @@
     "other": "%1 días en la tarjeta"
   },
   "recordings.loading": "Leyendo la tarjeta SD…",
-  "recordings.hint": "Tocá la línea de tiempo o un movimiento para reproducir.",
+  "recordings.hint": "Hacé clic en la línea de tiempo o en un movimiento para reproducir.",
   "recordings.empty": "No hay grabaciones en este día.",
   "recordings.connecting": "Cargando desde la tarjeta SD…",
   "recordings.ended": "Fin de las grabaciones de este día.",
@@ -114,15 +114,16 @@
   "recordings.nextMotion": "Movimiento siguiente (↓)",
   "recordings.back10": "Atrás 10 s (←)",
   "recordings.forward10": "Adelante 10 s (→)",
-  "recordings.prevHour": "Hora anterior",
-  "recordings.nextHour": "Hora siguiente",
+  "recordings.prevHour": "Hora anterior (,)",
+  "recordings.nextHour": "Hora siguiente (.)",
   "recordings.motionCount": {
-    "one": "%1 movimiento",
-    "other": "%1 movimientos"
+    "one": "%1 evento",
+    "other": "%1 eventos"
   },
-  "recordings.noMotion": "Sin movimiento",
+  "recordings.noMotion": "Sin eventos de movimiento",
   "recordings.error.noRecording": "No hay nada grabado desde ese momento en este día.",
   "recordings.error.unsupported": "Esta cámara no permite explorar su tarjeta SD acá.",
   "recordings.error.failed": "No se pudo leer la tarjeta SD.",
-  "recordings.speed": "Reproducir a %1×"
+  "recordings.speed": "Reproducir a %1×",
+  "recordings.connectingAt": "Cargando %1 desde la tarjeta SD…"
 }
