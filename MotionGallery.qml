@@ -175,6 +175,7 @@ FocusScope {
     property string saveError: ""
     property real saveProgress: 0
     property string saveFor: ""      // the still the save belongs to
+    property bool savePending: false // waits for a cancelled download to finish stopping
     readonly property bool saveRetryable: saveError !== "login" && saveError !== "unsupported"
     onSelectedIndexChanged: cancelSave()
 
@@ -194,9 +195,10 @@ FocusScope {
         return strings.t("clip.megabytes").arg(Qt.locale(Commons.I18n.formatLocale).toString(bytes / 1048576, "f", 1))
     }
     function startSave() {
-        if (!clipAvailable || clipFetcher.running || clipSaver.running) return
+        if (!clipAvailable || clipSaver.running) return
         saveFor = previewItem.path
         saveState = "fetching"; saveError = ""; saveProgress = 0
+        if (clipFetcher.running) { savePending = true; return }
         clipFetcher.gotResult = false
         clipFetcher.command = ["python3", clipHelper, "--camera", String(previewItem.cameraId),
             "--at", previewItem.date + " " + previewItem.time]
@@ -204,13 +206,14 @@ FocusScope {
     }
     // Leaving a still cancels its download (sdclip.py then tells the camera to stop).
     function cancelSave() {
+        savePending = false
         if (clipFetcher.running) clipFetcher.running = false
         saveState = ""; saveError = ""; saveProgress = 0; saveFor = ""
     }
     function handleFetchLine(line) {
         var message
         try { message = JSON.parse(line) } catch (error) { return }
-        if (!message || typeof message !== "object" || saveState !== "fetching") return
+        if (!message || typeof message !== "object" || saveState !== "fetching" || savePending) return
         if (typeof message.progress === "number") { saveProgress = message.progress; return }
         clipFetcher.gotResult = true
         if (message.ok === true && typeof message.path === "string" && message.path !== "" && previewItem) {
@@ -303,6 +306,13 @@ FocusScope {
         property bool gotResult: false
         stdout: SplitParser { onRead: function(line) { root.handleFetchLine(line) } }
         onExited: function(code) {
+            if (root.savePending) {
+                root.savePending = false
+                // Restart after this handler: the process may still count as running here.
+                if (root.saveState === "fetching" && root.previewItem && root.previewItem.path === root.saveFor)
+                    Qt.callLater(root.startSave)
+                return
+            }
             if (root.saveState === "fetching" && !gotResult) {
                 root.saveError = "failed"
                 root.saveState = "error"

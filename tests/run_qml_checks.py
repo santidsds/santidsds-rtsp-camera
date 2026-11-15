@@ -112,7 +112,9 @@ elif camera == "slow":
     say({"progress": 1048576})
     time.sleep(30)
 ''')
-    environment = dict(os.environ, XDG_CONFIG_HOME=str(work / "config"),
+    # Own data and cache folders: tests never read real motion stills or clips.
+    environment = dict(os.environ, XDG_CONFIG_HOME=str(work / "config"), XDG_DATA_HOME=str(work / "data"),
+                       XDG_CACHE_HOME=str(work / "cache"),
                        QT_QUICK_CONTROLS_STYLE="Basic", CAMERA_CLOCK_TICKS=str(os.sysconf("SC_CLK_TCK")))
     environment["CAMERA_TEST_FAKE_CLIP"] = str(work / "fake_clip.py")
     environment["QML_XHR_ALLOW_FILE_READ"] = "1"

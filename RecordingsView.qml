@@ -388,7 +388,7 @@ FocusScope {
         onExited: function(code) {
             if (root.pendingAt >= 0) {
                 root.cursor = root.pendingAt
-                root.startSession()
+                Qt.callLater(root.startSession)  // after this handler, once the process is gone
                 return
             }
             if (root.playState === "connecting" && !gotUrl) {

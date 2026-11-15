@@ -64,7 +64,7 @@ ShellRoot {
                 else if (Quickshell.env("CAMERA_TEST_BENCHMARK") === "1") probe.runVideoStyles(true)
                 else {
                     probe.runAppearance(); probe.runOverlayPixels(); probe.runEffectPixels(); probe.runDrag()
-                    probe.runAppleChrome(); probe.runMotionGallery(); probe.runMotionClip(); probe.runRecordings()
+                    probe.runAppleChrome(); probe.runMotionGallery(); probe.runMotionActions(); probe.runRecordings()
                     if (Quickshell.env("CAMERA_TEST_UI_ONLY") !== "1") { probe.runVideoStyles(false); probe.runReconnect() }
                     probe.runProfiles()
                 }
@@ -203,13 +203,23 @@ ShellRoot {
             panel.configured = false
             console.log("PASS: toolbar full screen, Live/Motion segments, toolbar toggles, PiP sizing, proportional resize, contrast")
         }
-        function runMotionGallery() {
+        function openPanel() {
             panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
             panel.configured = true; panel.configuring = false
             panel.pinned = true; panel.open()
             var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
             var content = popup.contentItem[0]
             parent = content
+            return content
+        }
+        function readWork(name) {
+            var request = new XMLHttpRequest()
+            request.open("GET", Qt.resolvedUrl(name), false)
+            try { request.send() } catch (error) { return "" }
+            return request.responseText || ""
+        }
+        function runMotionGallery() {
+            var content = openPanel()
             function field(name) { return find(content, function(i) { return i.objectName === name }) }
             panel.openMotionGallery()
             var gallery = field("motionGallery")
@@ -221,12 +231,13 @@ ShellRoot {
             gallery.items = [
                 {name: "a.jpg", path: "/nonexistent/a.jpg", time: "22:49:17", date: gallery.today},
                 {name: "b.jpg", path: "/nonexistent/b.jpg", time: markup, date: "2000-01-02"}]
-            wait(150)
+            wait(200)
             assertOk(field("motionGrid").visible && !field("motionEmpty").visible, "grid shows stills")
-            assertOk(field("motionSubtitle").text.indexOf("2") === 0, "subtitle counts the stills")
+            assertOk(field("motionSubtitle").text.indexOf("2") === 0, "subtitle counts the events")
             var caption = find(gallery, function(i) { return typeof i.text === "string" && i.text.indexOf(markup) >= 0 })
             assertOk(caption !== null && caption.textFormat === Text.PlainText, "still captions stay plain text")
-            assertOk(!field("motionCameraFilter").visible, "no camera filter with a single camera")
+            assertOk(find(gallery, function(i) { return i.objectName === "motionSectionHeader" && i.visible && i.text.indexOf("22:00") >= 0 }),
+                "stills are grouped under their hour")
             gallery.selectedIndex = 0
             gallery.forceActiveFocus()
             assertOk(field("motionPreview").visible, "viewer opens on a still")
@@ -238,25 +249,33 @@ ShellRoot {
             equal(gallery.selectedIndex, 0, "left arrow shows the previous still")
             keyClick(Qt.Key_Escape)
             assertOk(gallery.selectedIndex === -1 && panel.showingMotion, "Esc closes the viewer first")
-            // Several cameras: filter and per-still camera names.
+            // Bursts collapse; filters by time and (from the toolbar) by camera.
             var cameraMarkup = "<b>Back</b>"
-            gallery.items = [
-                {name: "c.jpg", path: "/nonexistent/c.jpg", time: "23:00:00", date: gallery.today, cameraId: "front", cameraName: "Front"},
-                {name: "d.jpg", path: "/nonexistent/d.jpg", time: "22:00:00", date: gallery.today, cameraId: "back", cameraName: cameraMarkup},
-                {name: "e.jpg", path: "/nonexistent/e.jpg", time: "21:00:00", date: gallery.today, cameraId: "back", cameraName: cameraMarkup}]
-            wait(150)
-            var filter = field("motionCameraFilter")
-            assertOk(filter.visible && filter.model.length === 3, "camera filter offers All plus each camera")
+            var now = Date.now(), at = function(ago) { return new Date(now - ago * 1000) }
+            function still(name, ago, camera, label) {
+                return {name: name, path: "/nonexistent/" + name, mtime: (now - ago * 1000) / 1000,
+                    time: Qt.formatTime(at(ago), "HH:mm:ss"), date: Qt.formatDate(at(ago), "yyyy-MM-dd"),
+                    cameraId: camera, cameraName: label}
+            }
+            gallery.items = [still("c1.jpg", 10, "front", "Front"), still("c2.jpg", 30, "front", "Front"),
+                still("c3.jpg", 50, "front", "Front"), still("d.jpg", 900, "back", cameraMarkup),
+                still("e.jpg", 5400, "back", cameraMarkup)]
+            wait(200)
+            equal(gallery.groups.length, 3, "stills less than a minute apart are one event")
+            assertOk(find(gallery, function(i) { return i.objectName === "burstBadge" && i.visible && i.children[0].text === "×3" }),
+                "a burst shows how many stills it holds")
             var nameLabel = find(gallery, function(i) { return i.objectName === "stillCameraName" && i.text === cameraMarkup })
             assertOk(nameLabel !== null && nameLabel.visible && nameLabel.textFormat === Text.PlainText,
                 "stills name their camera in plain text")
-            mouseClick(find(filter, function(i) { return i.text === cameraMarkup && i.clicked !== undefined }))
-            assertOk(gallery.visibleItems.length === 2 && gallery.activeFilter === "back", "filter shows one camera's stills")
-            assertOk(field("motionSubtitle").text.indexOf("2") === 0, "subtitle counts the filtered stills")
+            mouseClick(field("filterHour"))
+            equal(gallery.groups.length, 2, "Last hour leaves out older events")
+            mouseClick(field("filterAll"))
+            panel.motionCameraFilter = "back"
+            wait(50)
+            assertOk(gallery.cameraFilter === "back" && gallery.visibleItems.length === 2, "the toolbar's camera menu filters Motion")
             assertOk(!find(gallery, function(i) { return i.objectName === "stillCameraName" && i.visible }),
                 "camera names hide while filtered to one camera")
-            mouseClick(find(filter, function(i) { return i.text === "All" && i.clicked !== undefined }))
-            equal(gallery.visibleItems.length, 3, "All shows every camera")
+            panel.motionCameraFilter = ""
             // Listener status: per-camera format and the older flat one.
             var mixed = gallery.summarizeStatus({enabled: true, cameras: {
                 front: {name: "Front", listening: true}, back: {name: "Back", listening: false, lastError: "ConnectionRefusedError"}}})
@@ -270,123 +289,100 @@ ShellRoot {
             assertOk(!panel.showingMotion, "second Esc returns to live view")
             panel.close()
             panel.configured = false
-            console.log("PASS: gallery empty state, grid, plain captions, viewer navigation, camera filter, listener status and Esc")
+            console.log("PASS: gallery empty state, hour groups, plain captions, viewer navigation, bursts, time and camera filters, listener status and Esc")
         }
-        function runMotionClip() {
-            panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
-            panel.configured = true; panel.configuring = false
-            panel.pinned = true; panel.open()
-            var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
-            var content = popup.contentItem[0]
-            parent = content
+        function runMotionActions() {
+            var content = openPanel()
             function field(name) { return find(content, function(i) { return i.objectName === name }) }
             panel.openMotionGallery()
             var gallery = field("motionGallery")
             eventually(function() { return gallery.visible && !gallery.loading && gallery.listenerState !== "" }, 6000)
-            gallery.clipHelper = Quickshell.env("CAMERA_TEST_FAKE_CLIP")
+            var fake = Quickshell.env("CAMERA_TEST_FAKE_CLIP")
+            gallery.clipHelper = fake
             gallery.clipSources = {front: "dvrip", slow: "dvrip", broken: "dvrip", plain: "onvif", locked: "dvrip"}
-            gallery.items = [
-                {name: "f.jpg", path: "/nonexistent/f.jpg", time: "23:00:00", date: gallery.today, cameraId: "front", cameraName: "Front"},
-                {name: "s.jpg", path: "/nonexistent/s.jpg", time: "22:00:00", date: gallery.today, cameraId: "slow", cameraName: "Slow"},
-                {name: "b.jpg", path: "/nonexistent/b.jpg", time: "21:00:00", date: gallery.today, cameraId: "broken", cameraName: "Broken"},
-                {name: "p.jpg", path: "/nonexistent/p.jpg", time: "20:00:00", date: gallery.today, cameraId: "plain", cameraName: "Plain"},
-                {name: "l.jpg", path: "/nonexistent/l.jpg", time: "19:00:00", date: gallery.today, cameraId: "locked", cameraName: "Locked"}]
-            wait(100)
+            var view = field("recordingsView")
+            view.helper = fake
+            var today = gallery.today
+            var stills = [
+                {name: "f.jpg", path: "/nonexistent/f.jpg", time: "23:00:00", date: today, cameraId: "front", cameraName: "Front"},
+                {name: "s.jpg", path: "/nonexistent/s.jpg", time: "22:00:00", date: today, cameraId: "slow", cameraName: "Slow"},
+                {name: "b.jpg", path: "/nonexistent/b.jpg", time: "21:00:00", date: today, cameraId: "broken", cameraName: "Broken"},
+                {name: "p.jpg", path: "/nonexistent/p.jpg", time: "20:00:00", date: today, cameraId: "plain", cameraName: "Plain"},
+                {name: "l.jpg", path: "/nonexistent/l.jpg", time: "19:00:00", date: today, cameraId: "locked", cameraName: "Locked"}]
+            gallery.items = stills
+            wait(150)
             gallery.selectedIndex = 0
             gallery.forceActiveFocus()
-            var play = field("clipPlayButton")
-            assertOk(play.visible && play.enabled, "a DVRIP camera's still offers Play Clip")
+            assertOk(field("openInRecordings").visible && field("saveClip").visible,
+                "a DVRIP camera's still offers Watch in Recordings and Save clip")
             wait(300)
-            capture(content, "clip-offer")
-            mouseClick(play)
-            var player = field("clipPlayer")
-            eventually(function() { return gallery.clipState === "ready" }, 4000)
-            eventually(function() { return player.playbackState === MediaPlayer.PlayingState && player.hasVideo }, 6000)
-            assertOk(field("clipView").visible && field("clipSeek").visible, "the clip plays with a seek bar")
-            assertOk(field("clipPartialNote").visible, "a partial clip says so")
-            wait(400)
-            capture(content, "clip-playing")
-            keyClick(Qt.Key_Space)
-            eventually(function() { return player.playbackState === MediaPlayer.PausedState }, 2000)
-            keyClick(Qt.Key_Space)
-            eventually(function() { return player.playbackState === MediaPlayer.PlayingState }, 2000)
-            mouseClick(field("clipSave"))
-            eventually(function() { return gallery.saveState === "saved" }, 4000)
-            keyClick(Qt.Key_Escape)
-            assertOk(gallery.clipState === "" && gallery.selectedIndex === 0, "Esc closes the clip before the viewer")
-            assertOk(player.playbackState === MediaPlayer.StoppedState, "closing the clip stops playback")
-            // A slow download is cancelled (SIGTERM, so the camera is told to stop) by moving to another still.
+            capture(content, "motion-still")
+            // Save clip: downloads from the card, then copies to Videos.
+            mouseClick(field("saveClip"))
+            eventually(function() { return gallery.saveState === "saved" }, 5000)
+            assertOk(readWork("clip-saved").indexOf("clip.mp4") >= 0, "the downloaded clip is the one saved")
+            // Watch in Recordings: switches tab and plays that camera, 3 s before the still.
+            mouseClick(field("openInRecordings"))
+            assertOk(panel.showingRecordings && !panel.showingMotion, "Watch in Recordings opens the Recordings tab")
+            view.cameraId = "front"  // the test panel has no camera list to switch with
+            eventually(function() { return readWork("play-calls").indexOf("front " + today + " 22:59:57") >= 0 }, 6000)
+            eventually(function() { return view.playState === "playing" }, 8000)
+            // A slow download is cancelled (SIGTERM, so the camera is told to stop) by moving on.
+            gallery.listenerState = ""
+            panel.openMotionGallery()
+            // Reopening refreshes the list and the cameras' status: wait, then set ours again.
+            eventually(function() { return !gallery.loading && gallery.listenerState !== "" }, 6000)
+            gallery.items = stills
+            gallery.clipSources = {front: "dvrip", slow: "dvrip", broken: "dvrip", plain: "onvif", locked: "dvrip"}
+            wait(100)
+            gallery.selectedIndex = 1
+            gallery.forceActiveFocus()
+            mouseClick(field("saveClip"))
+            eventually(function() { return gallery.saveState === "fetching" && gallery.saveProgress > 0 }, 4000)
+            assertOk(field("saveClipStatus").text.indexOf("MB") > 0, "saving shows the downloaded size")
             keyClick(Qt.Key_Right)
-            equal(gallery.selectedIndex, 1, "right arrow moves to the slow camera's still")
-            keyClick(Qt.Key_Space)
-            eventually(function() { return gallery.clipState === "fetching" && gallery.clipProgress > 0 }, 4000)
-            assertOk(field("clipFetchingLabel").visible && field("clipFetchingLabel").text.indexOf("MB") > 0,
-                "fetching shows the downloaded size")
-            capture(content, "clip-fetching")
+            assertOk(gallery.saveState === "" && gallery.selectedIndex === 2, "moving on cancels the download")
+            eventually(function() { return readWork("clip-cancelled") === "cancelled" }, 4000)
+            // Errors explain themselves; a refused login offers no retry.
+            mouseClick(field("saveClip"))
+            eventually(function() { return gallery.saveState === "error" }, 4000)
+            assertOk(field("saveClipStatus").text === gallery.clipErrorText("no-recording") && field("saveClipRetry").visible,
+                "an error explains itself and offers a retry")
             keyClick(Qt.Key_Right)
-            assertOk(gallery.clipState === "" && gallery.selectedIndex === 2, "moving on cancels the download")
-            // Asking for the next clip at once waits for the cancelled one to stop, then starts.
-            mouseClick(field("clipPlayButton"))
-            eventually(function() { return gallery.clipState === "error" }, 4000)
-            keyClick(Qt.Key_Escape)
-            eventually(function() {
-                var marker = new XMLHttpRequest()
-                marker.open("GET", Qt.resolvedUrl("clip-cancelled"), false)
-                try { marker.send() } catch (error) { return false }
-                return marker.responseText === "cancelled"
-            }, 4000)
-            // An error offers a retry.
-            mouseClick(field("clipPlayButton"))
-            eventually(function() { return gallery.clipState === "error" }, 4000)
-            assertOk(field("clipErrorMessage").visible && field("clipErrorMessage").text === gallery.clipErrorText("no-recording")
-                && field("clipRetry").visible, "an error explains itself and offers a retry")
-            capture(content, "clip-error")
-            keyClick(Qt.Key_Escape)
+            assertOk(!field("openInRecordings").visible, "cameras without DVRIP have no recordings to open")
             keyClick(Qt.Key_Right)
-            assertOk(!field("clipPlayButton").visible, "cameras without DVRIP don't offer clips")
-            keyClick(Qt.Key_Right)
-            mouseClick(field("clipPlayButton"))
-            eventually(function() { return gallery.clipState === "error" }, 4000)
-            assertOk(field("clipErrorMessage").visible && !field("clipRetry").visible,
-                "a refused login offers no retry (each try counts toward a lockout)")
-            keyClick(Qt.Key_Escape)
+            mouseClick(field("saveClip"))
+            eventually(function() { return gallery.saveState === "error" }, 4000)
+            assertOk(!field("saveClipRetry").visible, "a refused login offers no retry (each try counts toward a lockout)")
             keyClick(Qt.Key_Escape)
             keyClick(Qt.Key_Escape)
             panel.close()
             panel.configured = false
-            console.log("PASS: clip play/pause/save, Esc order, cancel on navigation, error and retry, unsupported cameras")
+            console.log("PASS: still actions: save clip, watch in Recordings at the moment, cancel on navigation, errors, unsupported")
         }
         function runRecordings() {
-            panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
-            panel.configured = true; panel.configuring = false
-            panel.pinned = true; panel.open()
-            var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
-            var content = popup.contentItem[0]
-            parent = content
+            var content = openPanel()
             function field(name) { return find(content, function(i) { return i.objectName === name }) }
-            function readWork(name) {
-                var request = new XMLHttpRequest()
-                request.open("GET", Qt.resolvedUrl(name), false)
-                try { request.send() } catch (error) { return "" }
-                return request.responseText || ""
-            }
             var today = Qt.formatDate(new Date(), "yyyy-MM-dd")
             var yesterdayDate = new Date(); yesterdayDate.setDate(yesterdayDate.getDate() - 1)
             var yesterday = Qt.formatDate(yesterdayDate, "yyyy-MM-dd")
-            panel.resizeViewer(760, 620)
+            panel.resizeViewer(760, 640)
             wait(300)
             mouseClick(field("recordingsButton"))
             assertOk(panel.showingRecordings && !panel.showingMotion && !panel.streaming, "Recordings tab replaces the live view")
             var view = field("recordingsView")
             view.helper = Quickshell.env("CAMERA_TEST_FAKE_CLIP")
             view.cameraName = "Front"
+            view.cameraId = ""  // start fresh: the previous test left this camera at another moment
             view.cameraId = "front"
             eventually(function() { return view.indexState === "ready" }, 5000)
             wait(300)  // let the rows appear and lay out
             equal(view.days.length, 2, "days on the card")
             equal(view.motion.length, 2, "the day's motion events")
-            assertOk(field("recordingsSubtitle").text.indexOf("Front") === 0, "subtitle names the camera")
-            assertOk(field("recordingHint").visible, "a hint explains how to start")
+            equal(view.cursor, 11 * 3600 + 59 * 60 + 57, "opens on the latest motion, 3 s before it")
+            equal(view.hourStart, 11 * 3600, "the hour close-up shows that hour")
+            assertOk(field("recordingBigPlay").visible && view.playState === "", "a big play button waits; nothing streams yet")
+            assertOk(field("recordingClock").children[0].text.indexOf("11:59:57") >= 0, "the clock shows the moment")
             capture(content, "recordings-day")
             // Jump to a motion event: 3 s before it.
             var chip = find(field("motionEvents"), function(i) { return i.contentItem && i.contentItem.text === "06:39" })
@@ -395,34 +391,39 @@ ShellRoot {
             var player = field("recordingPlayer")
             eventually(function() { return view.playState === "playing" && player.hasVideo }, 8000)
             assertOk(readWork("play-calls").indexOf("front " + today + " 06:39:34") >= 0, "playback starts 3 s before the motion")
-            assertOk(field("recordingClock").visible && field("recordingClock").children[0].text.indexOf("06:39") >= 0,
-                "the clock shows the moment being played")
+            assertOk(field("recordingClock").children[0].text.indexOf("06:39") >= 0, "the clock follows playback")
             wait(600)
             capture(content, "recordings-playing")
             keyClick(Qt.Key_Space)
             eventually(function() { return view.playState === "paused" }, 2000)
             keyClick(Qt.Key_Space)
             eventually(function() { return view.playState === "playing" }, 2000)
-            // Fast forward: the player runs faster and the clock keeps up.
+            // Speed: buttons and 1-4 keys.
             mouseClick(field("speed4"))
             equal(player.playbackRate, 4, "4x speed")
             var fastFrom = view.position
             wait(1500)
             assertOk(view.position - fastFrom > 3, "at 4x the clock moves faster: " + (view.position - fastFrom))
-            mouseClick(field("speed1"))
-            equal(player.playbackRate, 1, "back to normal speed")
-            // Full screen is on every tab and survives switching tabs.
-            var fullButton = field("fullscreenToolbarButton")
-            assertOk(fullButton.visible, "full-screen button is shown on the Recordings tab")
-            mouseClick(fullButton)
-            assertOk(panel.fullscreen && panel.showingRecordings, "Recordings goes full screen")
-            mouseClick(field("motionButton"))
-            assertOk(panel.fullscreen && panel.showingMotion, "switching tabs keeps full screen")
-            mouseClick(field("recordingsButton"))
-            mouseClick(field("fullscreenToolbarButton"))
-            assertOk(!panel.fullscreen && panel.showingRecordings, "and leaves it again")
-            eventually(function() { return view.playState === "playing" || view.playState === "connecting" || view.playState === "" }, 2000)
-            if (view.playState !== "playing") { view.requestPlay(view.cursor); eventually(function() { return view.playState === "playing" }, 8000) }
+            keyClick(Qt.Key_1)
+            equal(player.playbackRate, 1, "1 key: normal speed")
+            // Hours: , and . move the close-up.
+            var hour = view.hourStart
+            keyClick(Qt.Key_Period)
+            equal(view.hourStart, hour + 3600, ". shows the next hour")
+            keyClick(Qt.Key_Comma)
+            equal(view.hourStart, hour, ", shows the previous hour")
+            // Full screen: video fills, controls float and hide when idle; F toggles.
+            keyClick(Qt.Key_F)
+            assertOk(panel.fullscreen && view.immersive, "F goes full screen")
+            wait(200)
+            assertOk(field("recordingDayMenu").visible && !field("recordingDays").visible, "full screen folds the days into a menu")
+            capture(content, "recordings-fullscreen")
+            eventually(function() { return !view.controlsShown }, 4000)
+            mouseMove(field("recordingStage"), 200, 120)
+            assertOk(view.controlsShown, "moving the mouse brings the controls back")
+            keyClick(Qt.Key_F)
+            assertOk(!panel.fullscreen && !view.immersive, "F leaves full screen")
+            eventually(function() { return view.playState === "playing" }, 8000)
             // Forward 10 s starts a new session from the new moment and stops the old one.
             var before = view.position
             keyClick(Qt.Key_Right)
@@ -438,15 +439,16 @@ ShellRoot {
             mouseClick(find(field("recordingDays"), function(i) { return i.text === "Yesterday" }))
             eventually(function() { return view.indexState === "ready" && view.day === yesterday }, 5000)
             assertOk(view.playState === "" && readWork("index-calls").indexOf("front " + yesterday) >= 0, "day switch reloads and stops playback")
-            // A camera that can't do this explains itself.
+            // A camera that can't do this explains itself, without a retry.
             view.cameraId = "plain"
             eventually(function() { return view.indexState === "error" }, 5000)
-            assertOk(field("recordingsSubtitle").text === view.errorText("unsupported"), "unsupported cameras say so")
+            assertOk(field("recordingStatusText").text === view.errorText("unsupported") && !field("recordingRetry").visible,
+                "unsupported cameras say so")
             keyClick(Qt.Key_Escape)
             assertOk(!panel.showingRecordings, "Esc returns to live view")
             panel.close()
             panel.configured = false
-            console.log("PASS: recordings index, day strip, motion jump, play/pause, speed, full screen, ±10 s, next motion, day switch, unsupported, Esc")
+            console.log("PASS: recordings opens on the latest event, motion jump, play/pause, speed, hours, immersive full screen, ±10 s, next motion, day switch, unsupported, Esc")
         }
         function runDualView() {
             panel.close()
