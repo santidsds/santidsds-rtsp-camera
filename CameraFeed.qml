@@ -42,6 +42,9 @@ Item {
     property real aspect: 16 / 9
     signal audioRequested()
     signal fullscreenRequested()
+    // "HH:MM" of this camera's latest motion today; the chip opens it in Recordings.
+    property string lastMotion: ""
+    signal lastMotionRequested()
 
     function mute() { cameraAudio.muted = true }
     function toggleAudio() {
@@ -348,11 +351,59 @@ Item {
             anchors.bottomMargin: overlayInset + 12
             spacing: 6
             Item { Layout.fillWidth: true }
+            Controls.Button {
+                id: lastMotionChip
+                objectName: "lastMotionChip"
+                visible: root.lastMotion !== "" && !root.message
+                implicitHeight: 30
+                leftPadding: 12
+                rightPadding: 10
+                hoverEnabled: true
+                focusPolicy: Qt.TabFocus
+                Accessible.name: lastMotionText.text
+                contentItem: Row {
+                    spacing: 6
+                    Text {
+                        id: lastMotionText
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
+                        text: strings.t("feed.lastMotion").arg(root.lastMotion)
+                        font.family: ui.font
+                        font.pixelSize: ui.callout
+                        font.weight: Font.DemiBold
+                        font.features: { "tnum": 1 }
+                        color: "white"
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
+                        text: ui.iconChevronRight
+                        font.family: ui.iconFont
+                        font.pixelSize: 14
+                        color: Qt.rgba(1, 1, 1, 0.7)
+                    }
+                }
+                background: Rectangle {
+                    radius: height / 2
+                    color: lastMotionChip.down ? Qt.rgba(0, 0, 0, 0.7) : lastMotionChip.hovered ? ui.glassHover : ui.glass
+                    border.width: lastMotionChip.visualFocus ? 2 : 1
+                    border.color: lastMotionChip.visualFocus ? ui.alpha(ui.accent, 0.9) : ui.glassBorder
+                }
+                PanelToolTip {
+                    visible: lastMotionChip.hovered
+                    text: strings.t("feed.lastMotionTip")
+                    fontSize: Style.font.caption
+                }
+                onClicked: root.lastMotionRequested()
+                PointerArea {}
+            }
             FeedButton {
                 objectName: "fullscreenButton"
-                text: root.fullscreen ? ui.iconFullscreenExit : ui.iconFullscreen
+                // A tile enlarges its camera; a single view goes full screen.
+                text: root.fullscreen ? ui.iconFullscreenExit : root.compact ? ui.iconEnlarge : ui.iconFullscreen
                 Accessible.name: tipText
-                tipText: root.fullscreen ? "Exit Full Screen" : root.compact ? strings.t("feed.enlarge") : "Enter Full Screen"
+                tipText: root.fullscreen ? strings.t("window.exitFullScreen") + " (F)"
+                    : root.compact ? strings.t("feed.enlarge") : strings.t("window.fullScreen") + " (F)"
                 checked: root.fullscreen
                 onClicked: root.fullscreenRequested()
             }

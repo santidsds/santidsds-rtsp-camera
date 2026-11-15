@@ -21,6 +21,10 @@ Panel {
     property bool showingRecordings: false
     // Motion and Recordings replace the live view (its streams stop meanwhile).
     readonly property bool browsing: showingMotion || showingRecordings
+    // Motion's camera filter ("" = all cameras), chosen in the toolbar's camera menu.
+    property string motionCameraFilter: ""
+    // Latest motion per camera from motiond's status: id -> {date, time}.
+    property var lastMotionByCamera: ({})
     property bool fullscreen: false
     property bool pinned: false
     property bool configured: false
@@ -121,6 +125,35 @@ Panel {
     }
     function closeRecordings() {
         showingRecordings = false
+    }
+    // Watch a moment in Recordings (from a motion still or Live's last-motion chip):
+    // 3 s before it, on that camera and day.
+    function openRecordingsAt(cameraId, day, time) {
+        var parts = String(time).split(":")
+        if (parts.length !== 3 || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return
+        var at = Math.max(0, (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]) - 3)
+        recordingsView.openAt(cameraId, day, at)
+        var index = cameras.findIndex(function(camera) { return camera.id === cameraId })
+        if (index >= 0 && index !== selectedCameraIndex) runProfileOperation({action: "select", id: cameraId})
+        openRecordings()
+    }
+    function lastMotionFor(cameraId) {
+        var event = lastMotionByCamera[cameraId || ""]
+        return event && event.date === Qt.formatDate(new Date(), "yyyy-MM-dd") ? event.time.slice(0, 5) : ""
+    }
+    function openLastMotion(cameraId) {
+        var event = lastMotionByCamera[cameraId || ""]
+        if (event) openRecordingsAt(cameraId, event.date, event.time)
+    }
+    function showTab(index) {
+        if (!configured) return
+        if (index === 1) openMotionGallery()
+        else if (index === 2) openRecordings()
+        else {
+            closeMotionGallery()
+            closeRecordings()
+            if (configuring && configured) { password.text = ""; configuring = false }
+        }
     }
     function toggleFullscreen() {
         if (!configured || configuring) return
@@ -395,6 +428,32 @@ Panel {
             if (root.sizeDirty) sizeSaveTimer.restart()
         }
     }
+    // Live's "last motion" chips: motiond's status has each camera's latest event.
+    Process {
+        id: motionStatus
+        command: ["python3", Qt.resolvedUrl("motiond.py").toString().replace(/^file:\/\//, ""), "--status"]
+        stdout: StdioCollector { id: motionStatusOut }
+        onExited: function(code) {
+            var latest = {}
+            try {
+                var cameras = JSON.parse(motionStatusOut.text || "{}").cameras || {}
+                for (var id in cameras) {
+                    var info = cameras[id] || {}
+                    var stamp = String(info.lastEvent || "")
+                    if (info.source === "dvrip" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(stamp))
+                        latest[id] = {date: stamp.slice(0, 10), time: stamp.slice(11, 19)}
+                }
+            } catch (error) {}
+            root.lastMotionByCamera = latest
+        }
+    }
+    Timer {
+        interval: 30000
+        repeat: true
+        triggeredOnStart: true
+        running: root.streaming
+        onTriggered: { motionStatus.running = false; motionStatus.running = true }
+    }
     FileView {
         id: configFile
         path: root.configPath
@@ -504,6 +563,15 @@ Panel {
         FocusScope {
             id: content
             anchors.fill: parent
+            Keys.onPressed: function(event) {
+                if (root.configuring || event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return
+                if (event.key === Qt.Key_F) root.toggleFullscreen()
+                else if (event.key === Qt.Key_L) root.showTab(0)
+                else if (event.key === Qt.Key_M) root.showTab(1)
+                else if (event.key === Qt.Key_R) root.showTab(2)
+                else return
+                event.accepted = true
+            }
             Keys.onEscapePressed: function(event) {
                 if (root.exitFullscreenIfActive(event)) return
                 if (root.showingMotion) {
@@ -575,14 +643,20 @@ Panel {
                             Layout.maximumWidth: Math.min(naturalWidth, 280)
                             Layout.preferredWidth: Math.min(naturalWidth, 280)
                             implicitHeight: ui.controlHeight
-                            model: root.cameras
+                            readonly property bool filtering: root.showingMotion && root.cameras.length > 1
+                            readonly property int filterIndex: root.motionCameraFilter === "" ? 0
+                                : 1 + root.cameras.findIndex(function(camera) { return camera.id === root.motionCameraFilter })
+                            model: filtering ? [{id: "", name: strings.t("motion.allCameras")}].concat(root.cameras) : root.cameras
                             textRole: "name"
-                            currentIndex: root.selectedCameraIndex
+                            currentIndex: filtering ? filterIndex : root.selectedCameraIndex
                             displayText: root.cameras.length ? currentText : strings.t("menu.noCameras")
-                            enabled: !writer.running && root.cameras.length > 0 && !root.showingMotion
+                            enabled: !writer.running && root.cameras.length > 0
                             hoverEnabled: true
                             Accessible.name: strings.t("menu.select")
-                            onActivated: function(index) { root.selectCamera(index) }
+                            onActivated: function(index) {
+                                if (filtering) root.motionCameraFilter = index === 0 ? "" : root.cameras[index - 1].id
+                                else root.selectCamera(index)
+                            }
                             contentItem: Item {
                                 Row {
                                     id: selectorRow
@@ -604,7 +678,7 @@ Panel {
                                             - (selectorDot.visible ? selectorDot.width + 7 : 0)))
                                         textFormat: Text.PlainText
                                         text: cameraSelector.displayText
-                                        color: cameraSelector.enabled || root.showingMotion ? ui.label : ui.secondaryLabel
+                                        color: cameraSelector.enabled ? ui.label : ui.secondaryLabel
                                         font.family: ui.font
                                         font.pixelSize: ui.body
                                         font.weight: Font.DemiBold
@@ -613,7 +687,7 @@ Panel {
                                     Text {
                                         id: chevron
                                         anchors.verticalCenter: parent.verticalCenter
-                                        visible: root.cameras.length > 0 && !root.showingMotion
+                                        visible: root.cameras.length > 0
                                         textFormat: Text.PlainText
                                         text: ui.iconChevronDown
                                         font.family: ui.iconFont
@@ -645,7 +719,7 @@ Panel {
                                         width: 16
                                         anchors.verticalCenter: parent.verticalCenter
                                         textFormat: Text.PlainText
-                                        text: cameraRow.index === root.selectedCameraIndex ? ui.iconCheck : ""
+                                        text: cameraRow.index === cameraSelector.currentIndex ? ui.iconCheck : ""
                                         font.family: ui.iconFont
                                         font.pixelSize: 13
                                         color: cameraRow.highlighted || cameraRow.hovered ? ui.onAccent : ui.label
@@ -749,29 +823,15 @@ Panel {
                             objectName: "viewModeControl"
                             model: [strings.t("view.live"), strings.t("view.motion"), strings.t("view.recordings")]
                             icons: headerControls.compact ? [ui.iconLive, ui.iconMotion, ui.iconHistory] : []
-                            tips: [strings.t("view.liveTip"), strings.t("view.motionTip"), strings.t("view.recordingsTip")]
                             segmentNames: ["liveButton", "motionButton", "recordingsButton"]
                             iconOnly: headerControls.compact
                             autoSelect: false
                             currentIndex: root.configuring ? -1 : root.showingMotion ? 1 : root.showingRecordings ? 2 : 0
                             enabled: !writer.running && root.configured
                             opacity: enabled ? 1 : 0.5
-                            onActivated: function(index) {
-                                if (index === 1) {
-                                    root.openMotionGallery()
-                                    return
-                                }
-                                if (index === 2) {
-                                    root.openRecordings()
-                                    return
-                                }
-                                root.closeMotionGallery()
-                                root.closeRecordings()
-                                if (root.configuring && root.configured) {
-                                    password.text = ""
-                                    root.configuring = false
-                                }
-                            }
+                            tips: [strings.t("view.liveTip") + " (L)", strings.t("view.motionTip") + " (M)",
+                                strings.t("view.recordingsTip") + " (R)"]
+                            onActivated: function(index) { root.showTab(index) }
                         }
                         RowLayout {
                             spacing: 2
@@ -780,8 +840,9 @@ Panel {
                                 glyph: ui.iconSplit
                                 tipText: root.dualView ? strings.t("layout.showSingle") : strings.t("layout.showBoth")
                                 Accessible.name: strings.t("layout.twoCameras")
-                                visible: !root.configuring && !root.browsing
-                                enabled: root.cameras.length > 1
+                                visible: !root.configuring
+                                opacity: root.browsing ? 0 : 1
+                                enabled: root.cameras.length > 1 && !root.browsing
                                 checked: root.dualView && root.cameras.length > 1
                                 onClicked: root.toggleDualView()
                             }
@@ -789,7 +850,9 @@ Panel {
                                 objectName: "themeButton"
                                 glyph: ui.iconPalette
                                 tipText: strings.t("toolbar.appearance")
-                                visible: !root.configuring && !root.browsing
+                                visible: !root.configuring
+                                opacity: root.browsing ? 0 : 1
+                                enabled: !root.browsing
                                 checked: root.editingAppearance
                                 onClicked: root.toggleAppearance()
                             }
@@ -809,7 +872,7 @@ Panel {
                             MacToolbarButton {
                                 objectName: "fullscreenToolbarButton"
                                 glyph: root.fullscreen ? ui.iconFullscreenExit : ui.iconFullscreen
-                                tipText: root.fullscreen ? strings.t("window.exitFullScreen") : strings.t("window.fullScreen")
+                                tipText: (root.fullscreen ? strings.t("window.exitFullScreen") : strings.t("window.fullScreen")) + " (F)"
                                 visible: !root.configuring  // every tab: Recordings needs the room most
                                 enabled: root.configured
                                 checked: root.fullscreen
@@ -819,7 +882,8 @@ Panel {
                                 id: pinSwitch
                                 objectName: "pinSwitch"
                                 glyph: root.pinned ? ui.iconPin : ui.iconPinOutline
-                                visible: !root.browsing
+                                opacity: root.browsing ? 0 : 1
+                                enabled: !root.browsing
                                 checked: root.pinned
                                 tipText: root.pinned ? strings.t("toolbar.unpin") : strings.t("toolbar.pin")
                                 onClicked: root.pinned = !root.pinned
@@ -862,6 +926,8 @@ Panel {
                                 message: root.message || root.sizeSaveError || root.positionSaveError
                                 onAudioRequested: root.toggleFeedAudio(primaryFeed)
                                 onFullscreenRequested: root.enlargeCamera(camera.id || "")
+                                lastMotion: root.lastMotionFor(camera.id)
+                                onLastMotionRequested: root.openLastMotion(camera.id)
                             }
                             CameraFeed {
                                 id: secondaryFeed
@@ -881,6 +947,8 @@ Panel {
                                 overlayStyle: primaryFeed.overlayStyle
                                 onAudioRequested: root.toggleFeedAudio(secondaryFeed)
                                 onFullscreenRequested: root.enlargeCamera(camera.id || "")
+                                lastMotion: root.lastMotionFor(camera.id)
+                                onLastMotionRequested: root.openLastMotion(camera.id)
                             }
                         }
                         // Appearance inspector: live preview, applied to every camera.
@@ -1169,7 +1237,9 @@ Panel {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         focus: root.showingMotion
+                        cameraFilter: root.motionCameraFilter
                         onClosed: root.closeMotionGallery()
+                        onOpenInRecordings: function(cameraId, date, time) { root.openRecordingsAt(cameraId, date, time) }
                     }
                     RecordingsView {
                         id: recordingsView
@@ -1181,6 +1251,7 @@ Panel {
                         active: root.showingRecordings && !root.configuring && root.opened
                         cameraId: root.selectedCameraId
                         cameraName: root.selectedCameraIndex >= 0 ? root.cameras[root.selectedCameraIndex].name : ""
+                        immersive: root.fullscreen
                         onClosed: root.closeRecordings()
                     }
                 }

@@ -303,6 +303,7 @@ FocusScope {
     onActiveChanged: {
         if (!active) { stopPlayback(); playState = ""; return }
         forceActiveFocus()
+        if (pendingOpen && pendingOpen.camera !== cameraId) return  // the camera switch loads it
         if (cameraId && (indexFor !== cameraId || indexState === "error")) loadIndex("")
         else if (day === today() && Date.now() - indexLoadedAt > 60000)
             loadIndex(day)  // today keeps recording: refresh on the way back in

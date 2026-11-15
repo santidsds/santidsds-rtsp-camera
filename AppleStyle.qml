@@ -82,6 +82,7 @@ QtObject {
     readonly property string iconSkipNext: String.fromCodePoint(0xF04AD)
     readonly property string iconBack: String.fromCodePoint(0xF013D)
     readonly property string iconForward: String.fromCodePoint(0xF013E)
+    readonly property string iconEnlarge: String.fromCodePoint(0xF004C)
 
     function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
     function luminance(color) { return 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b }

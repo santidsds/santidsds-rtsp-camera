@@ -136,5 +136,7 @@
   "motion.saveClip": "Save Clip",
   "motion.savingClip": "Saving clip…",
   "motion.allCameras": "All Cameras",
-  "motion.emptyFiltered": "No events in this period"
+  "motion.emptyFiltered": "No events in this period",
+  "feed.lastMotion": "Motion %1",
+  "feed.lastMotionTip": "Watch the latest motion in Recordings"
 }
