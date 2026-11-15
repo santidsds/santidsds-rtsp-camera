@@ -34,12 +34,63 @@ with tempfile.TemporaryDirectory(prefix="camera-checks-") as temporary:
         "-t", "4", "-c:v", "libx265", "-x265-params", "log-level=none", "-tag:v", "hvc1",
         "-c:a", "aac", "-shortest", str(work / "clip.mp4")
     ], check=True)
-    (work / "fake_clip.py").write_text('''import json, os, signal, sys, time
+    subprocess.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "testsrc=size=320x240:rate=12", "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=8000",
+        "-t", "20", "-c:v", "libx265", "-x265-params", "log-level=none", "-c:a", "aac", "-shortest",
+        "-f", "mpegts", str(work / "recording.ts")
+    ], check=True)
+    (work / "fake_clip.py").write_text('''import json, os, signal, sys, time, socket, datetime
 work = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 camera = args[args.index("--camera") + 1]
 def say(data):
     print(json.dumps(data), flush=True)
+def log(name, text):
+    with open(os.path.join(work, name), "a") as out:
+        out.write(text + "\\n")
+if "--index" in args:
+    today = datetime.date.today()
+    day = args[args.index("--date") + 1] if "--date" in args else today.isoformat()
+    log("index-calls", camera + " " + day)
+    if camera == "plain":
+        say({"ok": False, "error": "unsupported"})
+        sys.exit(1)
+    say({"ok": True, "days": [today.isoformat(), (today - datetime.timedelta(days=1)).isoformat()], "date": day,
+         "ranges": [["00:00:00", "23:59:59"]], "motion": [["06:39:37", "06:39:50"], ["12:00:00", "12:00:30"]]})
+    sys.exit(0)
+if "--play" in args:
+    at = args[args.index("--at") + 1]
+    log("play-calls", camera + " " + at)
+    def cancelled(*_):
+        log("play-cancelled", at)
+        sys.exit(1)
+    signal.signal(signal.SIGTERM, cancelled)
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    start = datetime.datetime.strptime(at, "%Y-%m-%d %H:%M:%S")
+    end = start + datetime.timedelta(minutes=30)
+    say({"url": "http://127.0.0.1:%d/token.ts" % server.getsockname()[1], "start": at,
+         "end": end.strftime("%Y-%m-%d %H:%M:%S")})
+    conn, _ = server.accept()
+    conn.recv(4096)
+    say({"first": at})
+    conn.sendall(b"HTTP/1.0 200 OK\\r\\nContent-Type: video/mp2t\\r\\n\\r\\n")
+    try:
+        with open(os.path.join(work, "recording.ts"), "rb") as source:
+            while True:
+                chunk = source.read(65536)
+                if not chunk:
+                    break
+                conn.sendall(chunk)
+                time.sleep(0.05)
+        time.sleep(60)  # like the real helper: the session stays open until replaced
+    except OSError:
+        pass
+    conn.close()
+    say({"ended": True})
+    sys.exit(0)
 if "--save" in args:
     open(os.path.join(work, "clip-saved"), "w").write(args[args.index("--save") + 1])
     say({"ok": True, "path": os.path.join(work, "saved.mp4")})

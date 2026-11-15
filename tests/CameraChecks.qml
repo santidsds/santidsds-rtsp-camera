@@ -64,7 +64,7 @@ ShellRoot {
                 else if (Quickshell.env("CAMERA_TEST_BENCHMARK") === "1") probe.runVideoStyles(true)
                 else {
                     probe.runAppearance(); probe.runOverlayPixels(); probe.runEffectPixels(); probe.runDrag()
-                    probe.runAppleChrome(); probe.runMotionGallery(); probe.runMotionClip()
+                    probe.runAppleChrome(); probe.runMotionGallery(); probe.runMotionClip(); probe.runRecordings()
                     if (Quickshell.env("CAMERA_TEST_UI_ONLY") !== "1") { probe.runVideoStyles(false); probe.runReconnect() }
                     probe.runProfiles()
                 }
@@ -355,6 +355,78 @@ ShellRoot {
             panel.close()
             panel.configured = false
             console.log("PASS: clip play/pause/save, Esc order, cancel on navigation, error and retry, unsupported cameras")
+        }
+        function runRecordings() {
+            panel.config = {url: Qt.resolvedUrl("sample.mp4").toString(), username: "", password: ""}
+            panel.configured = true; panel.configuring = false
+            panel.pinned = true; panel.open()
+            var popup = find(panel, function(i) { return i.cardOrigin !== undefined })
+            var content = popup.contentItem[0]
+            parent = content
+            function field(name) { return find(content, function(i) { return i.objectName === name }) }
+            function readWork(name) {
+                var request = new XMLHttpRequest()
+                request.open("GET", Qt.resolvedUrl(name), false)
+                try { request.send() } catch (error) { return "" }
+                return request.responseText || ""
+            }
+            var today = Qt.formatDate(new Date(), "yyyy-MM-dd")
+            var yesterdayDate = new Date(); yesterdayDate.setDate(yesterdayDate.getDate() - 1)
+            var yesterday = Qt.formatDate(yesterdayDate, "yyyy-MM-dd")
+            panel.resizeViewer(760, 620)
+            wait(300)
+            mouseClick(field("recordingsButton"))
+            assertOk(panel.showingRecordings && !panel.showingMotion && !panel.streaming, "Recordings tab replaces the live view")
+            var view = field("recordingsView")
+            view.helper = Quickshell.env("CAMERA_TEST_FAKE_CLIP")
+            view.cameraName = "Front"
+            view.cameraId = "front"
+            eventually(function() { return view.indexState === "ready" }, 5000)
+            wait(300)  // let the rows appear and lay out
+            equal(view.days.length, 2, "days on the card")
+            equal(view.motion.length, 2, "the day's motion events")
+            assertOk(field("recordingsSubtitle").text.indexOf("Front") === 0, "subtitle names the camera")
+            assertOk(field("recordingHint").visible, "a hint explains how to start")
+            capture(content, "recordings-day")
+            // Jump to a motion event: 3 s before it.
+            var chip = find(field("motionEvents"), function(i) { return i.contentItem && i.contentItem.text === "06:39" })
+            assertOk(chip !== null, "motion events are listed by time")
+            mouseClick(chip)
+            var player = field("recordingPlayer")
+            eventually(function() { return view.playState === "playing" && player.hasVideo }, 8000)
+            assertOk(readWork("play-calls").indexOf("front " + today + " 06:39:34") >= 0, "playback starts 3 s before the motion")
+            assertOk(field("recordingClock").visible && field("recordingClock").children[0].text.indexOf("06:39") >= 0,
+                "the clock shows the moment being played")
+            wait(600)
+            capture(content, "recordings-playing")
+            keyClick(Qt.Key_Space)
+            eventually(function() { return view.playState === "paused" }, 2000)
+            keyClick(Qt.Key_Space)
+            eventually(function() { return view.playState === "playing" }, 2000)
+            // Forward 10 s starts a new session from the new moment and stops the old one.
+            var before = view.position
+            keyClick(Qt.Key_Right)
+            eventually(function() { return readWork("play-calls").split("\n").filter(function(l) { return l }).length >= 2 }, 4000)
+            eventually(function() { return view.playState === "playing" }, 8000)
+            assertOk(Math.abs(view.position - (before + 10)) < 3, "forward 10 s lands 10 s later: " + view.position + " vs " + before)
+            // Next motion event.
+            keyClick(Qt.Key_Down)
+            eventually(function() { return readWork("play-calls").indexOf(today + " 11:59:57") >= 0 }, 4000)
+            eventually(function() { return view.playState === "playing" }, 8000)
+            assertOk(readWork("play-cancelled") !== "", "replaced sessions are cancelled (the camera is told to stop)")
+            // Another day: playback stops and that day's index loads.
+            mouseClick(find(field("recordingDays"), function(i) { return i.text === "Yesterday" }))
+            eventually(function() { return view.indexState === "ready" && view.day === yesterday }, 5000)
+            assertOk(view.playState === "" && readWork("index-calls").indexOf("front " + yesterday) >= 0, "day switch reloads and stops playback")
+            // A camera that can't do this explains itself.
+            view.cameraId = "plain"
+            eventually(function() { return view.indexState === "error" }, 5000)
+            assertOk(field("recordingsSubtitle").text === view.errorText("unsupported"), "unsupported cameras say so")
+            keyClick(Qt.Key_Escape)
+            assertOk(!panel.showingRecordings, "Esc returns to live view")
+            panel.close()
+            panel.configured = false
+            console.log("PASS: recordings index, day strip, motion jump, play/pause, ±10 s, next motion, day switch, unsupported, Esc")
         }
         function runDualView() {
             panel.close()
