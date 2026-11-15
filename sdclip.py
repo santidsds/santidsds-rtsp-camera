@@ -50,6 +50,7 @@ PACKET_TIMEOUT_SEC = 10   # one silent gap from the camera
 # Gentle on weak cameras: an X2C-WQ on Wi-Fi choked and rebooted when flooded.
 # ~3x the recording bitrate, so a 25 s clip takes about 8 s.
 RATE_LIMIT_BYTES = 320 * 1024   # per second
+PLAY_RATE_LIMIT_BYTES = 640 * 1024  # playback follows the player; this caps 4x fast-forward
 RECEIVE_BUFFER = 64 * 1024
 MAX_DATA_PACKET = 256 * 1024     # cameras send 32 KB playback packets; more means a bad length
 LOGIN_COOLDOWN_SEC = 600         # after a refused login, don't try again for a while (lockout)
@@ -965,7 +966,7 @@ def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime
                 wait_for_player()
             if final:
                 break
-            ahead = received / RATE_LIMIT_BYTES - (time.monotonic() - began)
+            ahead = received / PLAY_RATE_LIMIT_BYTES - (time.monotonic() - began)
             if ahead > 0:
                 time.sleep(ahead)
     except (OSError, ConnectionError):

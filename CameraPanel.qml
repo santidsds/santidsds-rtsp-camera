@@ -105,7 +105,6 @@ Panel {
     function openMotionGallery() {
         if (!configured) return
         editingAppearance = false
-        fullscreen = false
         configuring = false
         showingRecordings = false
         showingMotion = true
@@ -116,7 +115,6 @@ Panel {
     function openRecordings() {
         if (!configured) return
         editingAppearance = false
-        fullscreen = false
         configuring = false
         showingMotion = false
         showingRecordings = true
@@ -125,7 +123,7 @@ Panel {
         showingRecordings = false
     }
     function toggleFullscreen() {
-        if (!configured || configuring || browsing) return
+        if (!configured || configuring) return
         if (!fullscreen) {
             pinnedBeforeFullscreen = pinned
             originBeforeFullscreen = popup.pinnedOrigin
@@ -812,7 +810,7 @@ Panel {
                                 objectName: "fullscreenToolbarButton"
                                 glyph: root.fullscreen ? ui.iconFullscreenExit : ui.iconFullscreen
                                 tipText: root.fullscreen ? strings.t("window.exitFullScreen") : strings.t("window.fullScreen")
-                                visible: !root.configuring && !root.browsing
+                                visible: !root.configuring  // every tab: Recordings needs the room most
                                 enabled: root.configured
                                 checked: root.fullscreen
                                 onClicked: root.toggleFullscreen()

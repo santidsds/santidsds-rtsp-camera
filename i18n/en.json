@@ -123,5 +123,6 @@
   "recordings.noMotion": "No motion",
   "recordings.error.noRecording": "Nothing recorded from that moment on this day.",
   "recordings.error.unsupported": "This camera can't browse its SD card here.",
-  "recordings.error.failed": "Couldn't read the SD card."
+  "recordings.error.failed": "Couldn't read the SD card.",
+  "recordings.speed": "Play at %1× speed"
 }

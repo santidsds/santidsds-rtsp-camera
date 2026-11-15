@@ -403,6 +403,26 @@ ShellRoot {
             eventually(function() { return view.playState === "paused" }, 2000)
             keyClick(Qt.Key_Space)
             eventually(function() { return view.playState === "playing" }, 2000)
+            // Fast forward: the player runs faster and the clock keeps up.
+            mouseClick(field("speed4"))
+            equal(player.playbackRate, 4, "4x speed")
+            var fastFrom = view.position
+            wait(1500)
+            assertOk(view.position - fastFrom > 3, "at 4x the clock moves faster: " + (view.position - fastFrom))
+            mouseClick(field("speed1"))
+            equal(player.playbackRate, 1, "back to normal speed")
+            // Full screen is on every tab and survives switching tabs.
+            var fullButton = field("fullscreenToolbarButton")
+            assertOk(fullButton.visible, "full-screen button is shown on the Recordings tab")
+            mouseClick(fullButton)
+            assertOk(panel.fullscreen && panel.showingRecordings, "Recordings goes full screen")
+            mouseClick(field("motionButton"))
+            assertOk(panel.fullscreen && panel.showingMotion, "switching tabs keeps full screen")
+            mouseClick(field("recordingsButton"))
+            mouseClick(field("fullscreenToolbarButton"))
+            assertOk(!panel.fullscreen && panel.showingRecordings, "and leaves it again")
+            eventually(function() { return view.playState === "playing" || view.playState === "connecting" || view.playState === "" }, 2000)
+            if (view.playState !== "playing") { view.requestPlay(view.cursor); eventually(function() { return view.playState === "playing" }, 8000) }
             // Forward 10 s starts a new session from the new moment and stops the old one.
             var before = view.position
             keyClick(Qt.Key_Right)
@@ -426,7 +446,7 @@ ShellRoot {
             assertOk(!panel.showingRecordings, "Esc returns to live view")
             panel.close()
             panel.configured = false
-            console.log("PASS: recordings index, day strip, motion jump, play/pause, ±10 s, next motion, day switch, unsupported, Esc")
+            console.log("PASS: recordings index, day strip, motion jump, play/pause, speed, full screen, ±10 s, next motion, day switch, unsupported, Esc")
         }
         function runDualView() {
             panel.close()

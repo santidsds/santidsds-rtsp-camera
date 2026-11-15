@@ -123,5 +123,6 @@
   "recordings.noMotion": "Sin movimiento",
   "recordings.error.noRecording": "No hay nada grabado desde ese momento en este día.",
   "recordings.error.unsupported": "Esta cámara no permite explorar su tarjeta SD acá.",
-  "recordings.error.failed": "No se pudo leer la tarjeta SD."
+  "recordings.error.failed": "No se pudo leer la tarjeta SD.",
+  "recordings.speed": "Reproducir a %1×"
 }

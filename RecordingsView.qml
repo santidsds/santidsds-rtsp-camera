@@ -44,6 +44,8 @@ FocusScope {
     property real startPosition: 0    // player position (ms) when its first frame played
     property real pausedAt: 0
     property real hourOverride: -1
+    property real speed: 1
+    readonly property var speeds: [1, 1.5, 2, 4]
     readonly property real dayLength: 86400
     readonly property real position: (playState === "playing" || playState === "paused") && sessionStart >= 0
         ? Math.min(dayLength - 1, sessionStart + Math.max(0, player.position - startPosition) / 1000) : cursor
@@ -257,6 +259,7 @@ FocusScope {
         source: root.playUrl
         videoOutput: video
         audioOutput: AudioOutput { id: speaker }
+        playbackRate: root.speed  // the helper follows: a faster player pulls the camera faster
         onSourceChanged: if (source.toString() !== "") play()
         onPlaybackStateChanged: {
             if (playbackState === MediaPlayer.PlayingState && root.playState === "connecting") {
@@ -428,10 +431,11 @@ FocusScope {
             }
         }
 
-        // Transport
+        // Transport, with the playback speed on the right.
         RowLayout {
             Layout.fillWidth: true
             spacing: 4
+            Item { Layout.preferredWidth: speedControl.implicitWidth }  // keeps the buttons centred
             Item { Layout.fillWidth: true }
             MacToolbarButton {
                 objectName: "recordingPrevMotion"
@@ -470,6 +474,16 @@ FocusScope {
                 onClicked: { root.forceActiveFocus(); root.jumpMotion(1) }
             }
             Item { Layout.fillWidth: true }
+            MacSegmented {
+                id: speedControl
+                objectName: "recordingSpeed"
+                model: root.speeds.map(function(rate) { return Commons.I18n.formatNumber(rate) + "×" })
+                tips: root.speeds.map(function(rate) { return strings.t("recordings.speed").arg(Commons.I18n.formatNumber(rate)) })
+                segmentNames: ["speed1", "speed15", "speed2", "speed4"]
+                autoSelect: false
+                currentIndex: root.speeds.indexOf(root.speed)
+                onActivated: function(index) { root.speed = root.speeds[index]; root.forceActiveFocus() }
+            }
         }
 
         // The whole day, then a close-up of one hour.
