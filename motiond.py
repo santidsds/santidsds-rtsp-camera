@@ -778,12 +778,20 @@ def find_camera_ref(library, ref: str):
     return None
 
 
+def camera_host(config_dir: Path, camera: dict) -> str:
+    """The camera's own address, following a local relay (rtsp://127.0.0.1:8554/<name>)."""
+    url = camera.get("url") or ""
+    upstream = resolve_bridge_source(config_dir, url)
+    host = urlsplit(upstream or url).hostname or ""
+    return "" if host in LOOPBACK_HOSTS else host
+
+
 def dvrip_login_for(config_dir: Path, camera: dict) -> dict | None:
     """DVRIP host and account for a camera: its bridge source, or a saved device login."""
     source = motion_source(config_dir, camera)
     if source["kind"] == "dvrip":
         return {key: source[key] for key in ("host", "port", "user", "password")}
-    host = urlsplit(camera.get("url") or "").hostname or ""
+    host = camera_host(config_dir, camera)
     logins = load_json(config_dir / LOGINS_FILE, {})
     saved = logins.get(camera.get("id")) if isinstance(logins, dict) else None
     if not isinstance(saved, dict) or not host or host in LOOPBACK_HOSTS:
@@ -811,8 +819,8 @@ def cmd_set_login(config_dir: Path, ref: str, ask=input, ask_secret=getpass.getp
     if motion_source(config_dir, camera)["kind"] == "dvrip":
         print(f"{camera.get('name')} already uses the login from the local bridge; nothing to do.")
         return 0
-    host = urlsplit(camera.get("url") or "").hostname or ""
-    if not host or host in LOOPBACK_HOSTS:
+    host = camera_host(config_dir, camera)
+    if not host:
         print(f"{camera.get('name')} has no reachable host in its URL.")
         return 2
     print(f"Device login for {camera.get('name')} ({host}:{DVRIP_PORT}), the account used in the phone app.")

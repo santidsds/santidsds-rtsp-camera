@@ -347,6 +347,15 @@ class SetLoginTests(unittest.TestCase):
         login = motiond.dvrip_login_for(self.config, {"id": "c2", "url": "rtsp://127.0.0.1:8554/icsee_plugin"})
         self.assertEqual(login["host"], "192.0.2.3")
 
+    def test_relayed_camera_uses_its_real_host(self):
+        library = json.loads((self.config / "config.json").read_text())
+        library["cameras"][0]["url"] = "rtsp://127.0.0.1:8554/direct"
+        _write(self.config / "config.json", library)
+        self.assertEqual(self.run_set("Camera 1"), 0)
+        self.assertEqual(FakeLoginClient.tried, [("192.0.2.9", 34567, "admin", "s3cret")])
+        login = motiond.dvrip_login_for(self.config, library["cameras"][0])
+        self.assertEqual(login["host"], "192.0.2.9")
+
     def test_copy_login_from_bridge_camera(self):
         FakeLoginClient.accept = True
         code = motiond.cmd_set_login(self.config, "Camera 1", ask=None, ask_secret=None,
