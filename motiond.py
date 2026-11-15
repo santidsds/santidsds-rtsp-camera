@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-"""Always-on motion still capture for yani.camera (ONVIF PullPoint + snapshot).
+"""Always-on motion still capture for yani.camera, for every saved camera.
 
-Stdlib only. Reads camera credentials from config.json (never logs them).
+One worker thread per camera: ONVIF PullPoint events (with HTTP snapshots)
+for cameras reachable directly, or DVRIP alarms (with DVRIP snapshots) for
+XMeye/iCSee cameras behind the local go2rtc bridge. Stills go to
+<motion dir>/<camera id>/. Stdlib only; never logs credentials.
 CLI:
-  (default)     run capture loop until SIGTERM
-  --list        print JSON array of saved stills (newest first)
-  --once        one-shot: pull briefly / take a manual snapshot (debug)
-  --prune-only  apply retention then exit
+  (default)            run capture loops until SIGTERM
+  --list               print JSON array of saved stills (newest first)
+  --status             print listener status as JSON
+  --once [--camera ID] capture one still now (debug)
+  --prune-only         apply retention then exit
 """
+
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -18,6 +24,7 @@ import re
 import signal
 import socket
 import ssl
+import struct
 import sys
 import threading
 import time
@@ -65,40 +72,64 @@ def load_json(path: Path, default):
         return default
 
 
+def _write_private_json(path: Path, data) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
 def ensure_motion_config(config_dir: Path, library) -> dict:
+    """Load motion.json, creating or migrating it.
+
+    `cameraIds` is "all" (every saved camera, including ones added later) or a
+    list of ids. The old single `cameraId` migrates to "all", and that camera
+    becomes `legacyCameraId`: the owner of stills saved before per-camera
+    folders existed.
+    """
     path = config_dir / "motion.json"
     data = load_json(path, None)
-    cameras = library.get("cameras") or []
-    selected = library.get("selectedId") or ""
-    default_cam = selected if any(c.get("id") == selected for c in cameras) else (
-        cameras[0]["id"] if cameras else ""
-    )
+    changed = False
     if not isinstance(data, dict):
-        data = {
-            "enabled": True,
-            "cameraId": default_cam,
-            "retentionHours": DEFAULT_RETENTION_HOURS,
-            "maxFiles": DEFAULT_MAX_FILES,
-            "minIntervalSec": DEFAULT_MIN_INTERVAL_SEC,
-        }
-        config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-        return data
-    data.setdefault("enabled", True)
-    data.setdefault("cameraId", default_cam)
-    data.setdefault("retentionHours", DEFAULT_RETENTION_HOURS)
-    data.setdefault("maxFiles", DEFAULT_MAX_FILES)
-    data.setdefault("minIntervalSec", DEFAULT_MIN_INTERVAL_SEC)
-    if data.get("enabled") and not data.get("cameraId") and default_cam:
-        data["cameraId"] = default_cam
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
+        data = {}
+        changed = True
+    if "cameraIds" not in data:
+        old = data.pop("cameraId", "")
+        if old and not data.get("legacyCameraId"):
+            data["legacyCameraId"] = old
+        data["cameraIds"] = "all"
+        changed = True
+    elif "cameraId" in data:
+        data.pop("cameraId")
+        changed = True
+    for key, value in (("enabled", True), ("retentionHours", DEFAULT_RETENTION_HOURS),
+                       ("maxFiles", DEFAULT_MAX_FILES), ("minIntervalSec", DEFAULT_MIN_INTERVAL_SEC)):
+        if key not in data:
+            data[key] = value
+            changed = True
+    if changed:
+        _write_private_json(path, data)
     return data
+
+
+def monitored_cameras(library, motion_cfg) -> list[dict]:
+    """Saved cameras that motion capture should watch, in library order."""
+    cameras = [c for c in (library.get("cameras") or []) if isinstance(c, dict) and valid_camera_id(c.get("id"))]
+    wanted = motion_cfg.get("cameraIds", "all")
+    if wanted == "all":
+        return cameras
+    if not isinstance(wanted, list):
+        return []
+    return [c for c in cameras if c.get("id") in wanted]
+
+
+_CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def valid_camera_id(camera_id) -> bool:
+    """Camera ids become folder names; reject anything that could escape the motion dir."""
+    return isinstance(camera_id, str) and bool(_CAMERA_ID_RE.match(camera_id))
 
 
 def find_camera(library, camera_id: str):
@@ -159,23 +190,52 @@ def parse_still_time(name: str) -> datetime | None:
         return None
 
 
-def list_stills(motion_dir: Path) -> list[dict]:
+def camera_dir(motion_dir: Path, camera_id: str) -> Path:
+    if not valid_camera_id(camera_id):
+        raise ValueError("invalid camera id")
+    return motion_dir / camera_id
+
+
+def _still_entries(directory: Path):
+    if not directory.is_dir():
+        return
+    for path in directory.iterdir():
+        if path.is_file() and path.suffix.lower() in (".jpg", ".jpeg"):
+            yield path
+
+
+def list_stills(motion_dir: Path, names: dict | None = None, legacy_camera_id: str = "") -> list[dict]:
+    """Stills from every camera folder, newest first.
+
+    Files directly in motion_dir predate per-camera folders and belong to
+    legacy_camera_id. `names` maps camera ids to display names.
+    """
     if not motion_dir.is_dir():
         return []
+    names = names or {}
+    sources = [(legacy_camera_id, motion_dir)]
+    for child in motion_dir.iterdir():
+        if child.is_dir() and valid_camera_id(child.name):
+            sources.append((child.name, child))
     items = []
-    for path in motion_dir.iterdir():
-        if not path.is_file() or path.suffix.lower() not in (".jpg", ".jpeg"):
-            continue
-        when = parse_still_time(path.name)
-        items.append(
-            {
-                "name": path.name,
-                "path": str(path),
-                "mtime": path.stat().st_mtime,
-                "time": when.strftime("%H:%M:%S") if when else "",
-                "date": when.strftime("%Y-%m-%d") if when else "",
-            }
-        )
+    for camera_id, directory in sources:
+        for path in _still_entries(directory):
+            when = parse_still_time(path.name)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            items.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "mtime": mtime,
+                    "time": when.strftime("%H:%M:%S") if when else "",
+                    "date": when.strftime("%Y-%m-%d") if when else "",
+                    "cameraId": camera_id,
+                    "cameraName": names.get(camera_id, ""),
+                }
+            )
     items.sort(key=lambda item: item["mtime"], reverse=True)
     return items
 
@@ -215,18 +275,62 @@ def prune_stills(
     return removed
 
 
-def write_status(motion_dir: Path, **fields):
-    ensure_dirs(motion_dir)
-    path = motion_dir / ".status.json"
-    current = load_json(path, {})
-    if not isinstance(current, dict):
-        current = {}
-    current.update(fields)
-    current["updated"] = datetime.now(timezone.utc).isoformat()
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(current) + "\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+def prune_all(motion_dir: Path, retention_hours: int, max_files: int, now: float | None = None) -> int:
+    """Apply retention to the legacy folder and to each camera folder (max_files per camera)."""
+    if not motion_dir.is_dir():
+        return 0
+    removed = prune_stills(motion_dir, retention_hours, max_files, now=now)
+    for child in motion_dir.iterdir():
+        if child.is_dir() and valid_camera_id(child.name):
+            removed += prune_stills(child, retention_hours, max_files, now=now)
+    return removed
+
+
+class StatusBoard:
+    """Thread-safe writer for .status.json.
+
+    Layout: {"enabled", "updated", "cameras": {id: {name, source, listening,
+    lastError, lastEvent, lastReason, count}}} plus a summary ("listening",
+    "camera", "lastError") for older readers. Errors are exception class
+    names only: bridge URLs carry credentials.
+    """
+
+    def __init__(self, motion_dir: Path):
+        self.path = motion_dir / ".status.json"
+        self.motion_dir = motion_dir
+        self.lock = threading.Lock()
+
+    def _write(self, mutate):
+        with self.lock:
+            ensure_dirs(self.motion_dir)
+            current = load_json(self.path, {})
+            if not isinstance(current, dict):
+                current = {}
+            if not isinstance(current.get("cameras"), dict):
+                current = {"cameras": {}}
+            mutate(current)
+            cameras = current["cameras"].values()
+            current["listening"] = any(c.get("listening") for c in cameras)
+            current["camera"] = ", ".join(c.get("name", "") for c in cameras if c.get("name"))
+            current["lastError"] = next((c["lastError"] for c in cameras if c.get("lastError")), "")
+            current["updated"] = datetime.now(timezone.utc).isoformat()
+            tmp = self.path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(current) + "\n")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+
+    def update(self, camera_id: str, **fields):
+        def mutate(current):
+            current["cameras"].setdefault(camera_id, {}).update(fields)
+        self._write(mutate)
+
+    def set_global(self, **fields):
+        self._write(lambda current: current.update(fields))
+
+    def keep_only(self, camera_ids):
+        def mutate(current):
+            current["cameras"] = {k: v for k, v in current["cameras"].items() if k in camera_ids}
+        self._write(mutate)
 
 
 _HTTP_LOCAL = threading.local()
@@ -445,23 +549,361 @@ def save_still(motion_dir: Path, data: bytes) -> Path:
     return path
 
 
-class MotionLoop:
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+BRIDGE_CONFIG = "go2rtc.private.json"
+
+
+def resolve_bridge_source(config_dir: Path, url: str) -> str | None:
+    """Follow a local go2rtc stream (rtsp://127.0.0.1:8554/<name>) to its upstream URL.
+
+    Handles references between streams and ffmpeg: transcoding wrappers, e.g.
+    icsee_plugin -> "ffmpeg:icsee_baja#video=h264" -> "dvrip://user:pass@host".
+    """
+    split = urlsplit(url)
+    if (split.hostname or "") not in LOOPBACK_HOSTS:
+        return None
+    bridge = load_json(config_dir / BRIDGE_CONFIG, None)
+    streams = bridge.get("streams") if isinstance(bridge, dict) else None
+    if not isinstance(streams, dict):
+        return None
+    name = split.path.lstrip("/").split("/", 1)[0]
+    seen = set()
+    while name in streams and name not in seen:
+        seen.add(name)
+        source = streams[name]
+        if isinstance(source, list):
+            source = source[0] if source else None
+        if not isinstance(source, str):
+            return None
+        if source.startswith("ffmpeg:"):
+            source = source[len("ffmpeg:"):]
+        source = source.split("#", 1)[0].strip()
+        if "://" in source:
+            return source
+        name = source
+    return None
+
+
+def motion_source(config_dir: Path, camera: dict) -> dict:
+    """How to watch a camera for motion: ONVIF events, DVRIP alarms, or nothing."""
+    url = camera.get("url") or ""
+    upstream = resolve_bridge_source(config_dir, url)
+    if upstream:
+        split = urlsplit(upstream)
+        if split.scheme == "dvrip" and split.hostname:
+            return {"kind": "dvrip", "host": split.hostname, "port": split.port or DVRIP_PORT,
+                    "user": urllib.parse.unquote(split.username or ""),
+                    "password": urllib.parse.unquote(split.password or "")}
+        if split.scheme in ("rtsp", "rtsps") and split.hostname and split.hostname not in LOOPBACK_HOSTS:
+            user = urllib.parse.unquote(split.username or "")
+            password = urllib.parse.unquote(split.password or "")
+            if not (user or password):
+                user, password = extract_path_credentials(upstream)
+            return {"kind": "onvif", "host": split.hostname, "user": user, "password": password}
+        return {"kind": "none", "reason": "Unsupported bridge source."}
+    host = urlsplit(url).hostname or ""
+    if not host or host in LOOPBACK_HOSTS:
+        return {"kind": "none", "reason": "No motion source for this local stream."}
+    user, password = credentials_for(camera)
+    return {"kind": "onvif", "host": host, "user": user, "password": password}
+
+
+# --- DVRIP (XMeye / iCSee "Sofia" protocol) -----------------------------------
+DVRIP_PORT = 34567
+DVRIP_LOGIN = 1000
+DVRIP_KEEPALIVE = 1006
+DVRIP_GUARD = 1500
+DVRIP_ALARM = 1504
+DVRIP_SNAPSHOT = 1560
+DVRIP_SNAPSHOT_REPLY = 1561
+DVRIP_MAX_PACKET = 8 * 1024 * 1024
+_DVRIP_HEADER = struct.Struct("<BB2xII2xHI")
+
+
+def sofia_hash(password: str) -> str:
+    """XMeye password hash: 8 chars from pairs of MD5 bytes."""
+    digest = hashlib.md5(password.encode("utf-8")).digest()
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    return "".join(alphabet[(digest[2 * i] + digest[2 * i + 1]) % 62] for i in range(8))
+
+
+def dvrip_json(data: bytes) -> dict:
+    try:
+        value = json.loads(data.rstrip(b"\x00\x0a").decode("utf-8", "replace") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def alarm_is_motion_start(message: dict) -> bool:
+    info = message.get("AlarmInfo")
+    if not isinstance(info, dict):
+        return False
+    event = str(info.get("Event", "")).lower()
+    status = str(info.get("Status", "")).lower()
+    return status == "start" and any(word in event for word in ("motion", "human", "pir"))
+
+
+class DvripClient:
+    """Minimal DVRIP session: login, alarm guard, keepalive and JPEG snapshot."""
+
+    def __init__(self, host: str, port: int, user: str, password: str, timeout: float = HTTP_TIMEOUT):
+        self.host, self.port = host, port
+        self.user, self.password = user, password
+        self.timeout = timeout
+        self.sock = None
+        self.session = 0
+        self.sequence = 0
+        self.alive_interval = 20
+        self.pending_alarms = []
+
+    @property
+    def session_id(self) -> str:
+        return "0x%08X" % self.session
+
+    def connect(self):
+        self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        self.send(DVRIP_LOGIN, {"EncryptType": "MD5", "LoginType": "DVRIP-Web",
+                                "PassWord": sofia_hash(self.password), "UserName": self.user})
+        _, reply = self.recv_reply(DVRIP_LOGIN + 1)
+        if reply.get("Ret") not in (100, 515):
+            raise PermissionError("DVRIP login refused")
+        self.session = int(str(reply.get("SessionID", "0")), 16)
+        try:
+            self.alive_interval = max(5, int(reply.get("AliveInterval") or 20))
+        except (TypeError, ValueError):
+            self.alive_interval = 20
+
+    def close(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        self.sock = None
+
+    def send(self, msg: int, body: dict):
+        data = json.dumps(body).encode("utf-8")
+        packet = _DVRIP_HEADER.pack(255, 0, self.session, self.sequence, msg, len(data) + 2) + data + b"\x0a\x00"
+        self.sequence += 1
+        self.sock.sendall(packet)
+
+    def _recv_exact(self, size: int) -> bytes:
+        chunks, remaining = [], size
+        while remaining:
+            chunk = self.sock.recv(min(remaining, 65536))
+            if not chunk:
+                raise ConnectionError("DVRIP connection closed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def recv(self) -> tuple[int, bytes]:
+        head, _, _, _, msg, length = _DVRIP_HEADER.unpack(self._recv_exact(_DVRIP_HEADER.size))
+        if head != 255 or length > DVRIP_MAX_PACKET:
+            raise ConnectionError("bad DVRIP packet")
+        return msg, self._recv_exact(length)
+
+    def recv_reply(self, msg_id: int, limit: int = 32) -> tuple[int, dict]:
+        """Wait for a reply, setting aside alarms that arrive first."""
+        for _ in range(limit):
+            msg, data = self.recv()
+            if msg == DVRIP_ALARM:
+                self.pending_alarms.append(dvrip_json(data))
+                continue
+            if msg == msg_id:
+                return msg, dvrip_json(data)
+        raise ConnectionError("DVRIP reply missing")
+
+    def guard(self):
+        self.send(DVRIP_GUARD, {"Name": "", "SessionID": self.session_id})
+        _, reply = self.recv_reply(DVRIP_GUARD + 1)
+        if reply.get("Ret") not in (100, None):
+            raise RuntimeError("DVRIP alarm subscription refused")
+
+    def keepalive(self):
+        self.send(DVRIP_KEEPALIVE, {"Name": "KeepAlive", "SessionID": self.session_id})
+
+    def snapshot(self, channel: int = 0) -> bytes:
+        self.send(DVRIP_SNAPSHOT, {"Name": "OPSNAP", "SessionID": self.session_id,
+                                   "OPSNAP": {"Channel": channel}})
+        image = b""
+        for _ in range(64):
+            msg, data = self.recv()
+            if msg == DVRIP_ALARM:
+                self.pending_alarms.append(dvrip_json(data))
+                continue
+            if msg != DVRIP_SNAPSHOT_REPLY:
+                continue
+            image += data
+            # Large images arrive in several packets; the JPEG ends with FFD9.
+            if image[:2] == b"\xff\xd8" and image.rstrip(b"\x00").endswith(b"\xff\xd9"):
+                return image.rstrip(b"\x00")
+            if image[:1] == b"{":
+                raise RuntimeError("DVRIP snapshot refused")
+        raise RuntimeError("DVRIP snapshot incomplete")
+
+
+def retention_settings(cfg: dict) -> tuple[int, int, int]:
+    def number(key, default):
+        try:
+            return int(cfg.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+    return (number("retentionHours", DEFAULT_RETENTION_HOURS), number("maxFiles", DEFAULT_MAX_FILES),
+            max(1, number("minIntervalSec", DEFAULT_MIN_INTERVAL_SEC)))
+
+
+class CameraWorker(threading.Thread):
+    """Watches one camera; saves a still into its folder when it reports motion."""
+
+    def __init__(self, camera: dict, source: dict, motion_dir: Path, board: StatusBoard, settings: dict):
+        super().__init__(daemon=True, name=f"motion-{camera['id'][:8]}")
+        self.camera_id = camera["id"]
+        self.camera_name = camera.get("name") or ""
+        self.source = source
+        self.folder = camera_dir(motion_dir, self.camera_id)
+        self.board = board
+        self.settings = settings
+        self.stop_event = threading.Event()
+        self.last_save = 0.0
+        self.capture_lock = threading.Lock()
+
+    def stopped(self) -> bool:
+        return self.stop_event.is_set() or _STOP
+
+    def status(self, **fields):
+        self.board.update(self.camera_id, name=self.camera_name, source=self.source["kind"], **fields)
+
+    def save(self, data: bytes, reason: str) -> Path | None:
+        hours, max_files, _ = retention_settings(self.settings)
+        path = save_still(self.folder, data)
+        self.last_save = time.time()
+        prune_stills(self.folder, hours, max_files)
+        self.status(lastEvent=datetime.now().astimezone().isoformat(), lastError="", lastReason=reason,
+                    count=sum(1 for _ in _still_entries(self.folder)))
+        return path
+
+    def due(self) -> bool:
+        _, _, min_interval = retention_settings(self.settings)
+        return time.time() - self.last_save >= min_interval
+
+    def wait(self, seconds: float):
+        self.stop_event.wait(seconds)
+
+    def run(self):
+        backoff = 2
+        while not self.stopped():
+            try:
+                self.watch()
+                backoff = 2
+            except Exception as error:  # noqa: BLE001 — class name only, never URLs or secrets
+                self.status(listening=False, lastError=error.__class__.__name__)
+                self.wait(backoff)
+                backoff = min(60, backoff * 2)
+        self.status(listening=False)
+
+    def watch(self):
+        raise NotImplementedError
+
+    def capture_now(self, reason: str = "manual") -> Path | None:
+        raise NotImplementedError
+
+
+class OnvifWorker(CameraWorker):
+    def snapshot(self) -> bytes:
+        source = self.source
+        return fetch_snapshot(get_snapshot_url(source["host"], source["user"], source["password"]))
+
+    def capture_now(self, reason: str = "manual") -> Path | None:
+        return self.save(self.snapshot(), reason)
+
+    def watch(self):
+        sub_addr = None
+        expires = 0.0
+        try:
+            while not self.stopped():
+                now = time.time()
+                if sub_addr is None or now >= expires - RENEW_MARGIN_SEC:
+                    if sub_addr:
+                        unsubscribe(sub_addr)
+                        sub_addr = None
+                    sub_addr, expires = create_pull_subscription(resolve_event_xaddr(self.source["host"]))
+                    self.status(listening=True, lastError="")
+                started = time.time()
+                reply = pull_messages(sub_addr, timeout_sec=PULL_TIMEOUT_SEC)
+                expires = time.time() + 110
+                if event_looks_like_motion(reply) and self.due():
+                    try:
+                        self.capture_now("onvif")
+                    except Exception as error:  # noqa: BLE001 — keep listening; report the class only
+                        self.status(lastError=error.__class__.__name__)
+                elapsed = time.time() - started
+                if elapsed < MIN_PULL_PERIOD_SEC:
+                    self.wait(MIN_PULL_PERIOD_SEC - elapsed)
+        finally:
+            if sub_addr:
+                unsubscribe(sub_addr)
+
+
+class DvripWorker(CameraWorker):
+    def client(self) -> DvripClient:
+        source = self.source
+        return DvripClient(source["host"], source["port"], source["user"], source["password"])
+
+    def capture_now(self, reason: str = "manual") -> Path | None:
+        client = self.client()
+        try:
+            client.connect()
+            return self.save(client.snapshot(), reason)
+        finally:
+            client.close()
+
+    def watch(self):
+        client = self.client()
+        try:
+            client.connect()
+            client.guard()
+            client.sock.settimeout(1.0)
+            self.status(listening=True, lastError="")
+            last_keepalive = time.time()
+            while not self.stopped():
+                if time.time() - last_keepalive >= client.alive_interval / 2:
+                    client.keepalive()
+                    last_keepalive = time.time()
+                alarms, client.pending_alarms = client.pending_alarms, []
+                try:
+                    msg, data = client.recv()
+                    if msg == DVRIP_ALARM:
+                        alarms.append(dvrip_json(data))
+                except socket.timeout:
+                    pass
+                if any(alarm_is_motion_start(alarm) for alarm in alarms) and self.due():
+                    client.sock.settimeout(HTTP_TIMEOUT)
+                    self.save(client.snapshot(), "dvrip")
+                    client.sock.settimeout(1.0)
+        finally:
+            client.close()
+
+
+WORKER_KINDS = {"onvif": OnvifWorker, "dvrip": DvripWorker}
+
+
+class MotionSupervisor:
+    """Keeps one worker per monitored camera in step with config.json and motion.json."""
+
     def __init__(self, config_dir: Path, motion_dir: Path):
         self.config_dir = config_dir
         self.motion_dir = motion_dir
-        self.library = {}
-        self.motion_cfg = {}
-        self.host = ""
-        self.user = ""
-        self.password = ""
-        self.last_save = 0.0
-        self.last_prune = 0.0
-        self.last_config_check = 0.0
+        self.board = StatusBoard(motion_dir)
+        self.workers: dict[str, CameraWorker] = {}
+        self.settings: dict = {}
         self.config_stamp = None
+        self.last_prune = 0.0
 
     def _config_stamp(self):
         stamp = []
-        for name in ("config.json", "motion.json"):
+        for name in ("config.json", "motion.json", BRIDGE_CONFIG):
             try:
                 st = (self.config_dir / name).stat()
                 stamp.append((st.st_mtime_ns, st.st_size))
@@ -469,164 +911,119 @@ class MotionLoop:
                 stamp.append(None)
         return tuple(stamp)
 
-    def maybe_reload(self):
-        now = time.time()
-        if now - self.last_config_check < CONFIG_CHECK_SEC:
-            return
-        self.last_config_check = now
-        if self._config_stamp() != self.config_stamp:
-            self.reload()
+    def plan(self) -> dict:
+        """Desired workers: {camera_id: (camera, source)}."""
+        library = load_json(self.config_dir / "config.json", {"cameras": []})
+        if not isinstance(library, dict):
+            library = {"cameras": []}
+        self.settings = ensure_motion_config(self.config_dir, library)
+        self.config_stamp = self._config_stamp()
+        if not self.settings.get("enabled"):
+            return {}
+        return {camera["id"]: (camera, motion_source(self.config_dir, camera))
+                for camera in monitored_cameras(library, self.settings)}
+
+    def stop_worker(self, camera_id: str):
+        worker = self.workers.pop(camera_id)
+        worker.stop_event.set()
+        worker.join(timeout=HTTP_TIMEOUT + 2)
 
     def reload(self):
-        library = load_json(self.config_dir / "config.json", {"cameras": [], "selectedId": ""})
-        if not isinstance(library, dict):
-            library = {"cameras": [], "selectedId": ""}
-        self.library = library
-        self.motion_cfg = ensure_motion_config(self.config_dir, library)
-        self.config_stamp = self._config_stamp()
-        camera = find_camera(library, self.motion_cfg.get("cameraId") or "")
-        if not camera:
-            self.host = ""
-            write_status(self.motion_dir, enabled=bool(self.motion_cfg.get("enabled")),
-                         camera="", lastError="No camera bound for motion capture.")
-            return False
-        self.host = camera_host(camera["url"])
-        self.user, self.password = credentials_for(camera)
-        write_status(
-            self.motion_dir,
-            enabled=bool(self.motion_cfg.get("enabled")),
-            camera=camera.get("name") or "",
-            cameraId=camera.get("id") or "",
-            lastError="",
-        )
-        return True
+        desired = self.plan()
+        for camera_id, worker in list(self.workers.items()):
+            camera, source = desired.get(camera_id, (None, None))
+            if camera is None or source != worker.source or camera.get("name") != worker.camera_name:
+                self.stop_worker(camera_id)
+        self.board.keep_only(set(desired))
+        self.board.set_global(enabled=bool(self.settings.get("enabled")))
+        for camera_id, (camera, source) in desired.items():
+            if camera_id in self.workers:
+                self.workers[camera_id].settings = self.settings
+                continue
+            kind = WORKER_KINDS.get(source["kind"])
+            if kind is None:
+                self.board.update(camera_id, name=camera.get("name") or "", source="none",
+                                  listening=False, lastError=source.get("reason", "No motion source."))
+                continue
+            worker = kind(camera, source, self.motion_dir, self.board, self.settings)
+            self.workers[camera_id] = worker
+            worker.start()
 
-    def retention(self) -> tuple[int, int, int]:
-        cfg = self.motion_cfg or {}
-        try:
-            hours = int(cfg.get("retentionHours") or DEFAULT_RETENTION_HOURS)
-        except (TypeError, ValueError):
-            hours = DEFAULT_RETENTION_HOURS
-        try:
-            max_files = int(cfg.get("maxFiles") or DEFAULT_MAX_FILES)
-        except (TypeError, ValueError):
-            max_files = DEFAULT_MAX_FILES
-        try:
-            min_interval = int(cfg.get("minIntervalSec") or DEFAULT_MIN_INTERVAL_SEC)
-        except (TypeError, ValueError):
-            min_interval = DEFAULT_MIN_INTERVAL_SEC
-        return hours, max_files, max(1, min_interval)
-
-    def maybe_prune(self, force: bool = False):
-        now = time.time()
-        if not force and now - self.last_prune < PRUNE_EVERY_SEC:
-            return
-        self.last_prune = now
-        hours, max_files, _ = self.retention()
-        prune_stills(self.motion_dir, hours, max_files, now=now)
-
-    def capture_snapshot(self, reason: str = "motion") -> Path | None:
-        hours, max_files, min_interval = self.retention()
-        now = time.time()
-        if now - self.last_save < min_interval:
-            return None
-        if not self.host:
-            if not self.reload():
-                return None
-        try:
-            url = get_snapshot_url(self.host, self.user, self.password)
-            data = fetch_snapshot(url)
-            path = save_still(self.motion_dir, data)
-            self.last_save = time.time()
-            self.maybe_prune(force=True)
-            write_status(
-                self.motion_dir,
-                lastEvent=datetime.now().astimezone().isoformat(),
-                lastError="",
-                lastReason=reason,
-                count=len(list_stills(self.motion_dir)),
-            )
-            return path
-        except Exception as error:  # noqa: BLE001 — status only, no secrets
-            write_status(self.motion_dir, lastError=str(error.__class__.__name__))
-            return None
+    def prune(self):
+        hours, max_files, _ = retention_settings(self.settings)
+        prune_all(self.motion_dir, hours, max_files)
+        self.last_prune = time.time()
 
     def run(self) -> int:
+        # Signal handlers only work on the main thread; workers poll _STOP.
         signal.signal(signal.SIGTERM, _handle_signal)
         signal.signal(signal.SIGINT, _handle_signal)
         ensure_dirs(self.motion_dir)
         self.reload()
-        self.maybe_prune(force=True)
-        if not self.motion_cfg.get("enabled"):
-            write_status(self.motion_dir, enabled=False, lastError="Motion capture disabled.")
-            while not _STOP:
-                time.sleep(IDLE_POLL_SEC)
-                # pick up config edits
-                self.reload()
-                if self.motion_cfg.get("enabled"):
-                    break
-        sub_addr = None
-        expires = 0.0
-        backoff = 2
+        self.prune()
+        last_check = time.time()
         while not _STOP:
-            try:
-                if not self.motion_cfg.get("enabled"):
-                    if sub_addr:
-                        unsubscribe(sub_addr)
-                        sub_addr = None
-                    time.sleep(IDLE_POLL_SEC)
+            time.sleep(1)
+            now = time.time()
+            if now - last_check >= CONFIG_CHECK_SEC:
+                last_check = now
+                if self._config_stamp() != self.config_stamp:
                     self.reload()
-                    continue
-                if not self.host and not self.reload():
-                    time.sleep(IDLE_POLL_SEC)
-                    continue
-                now = time.time()
-                if sub_addr is None or now >= expires - RENEW_MARGIN_SEC:
-                    if sub_addr:
-                        unsubscribe(sub_addr)
-                        sub_addr = None
-                    event_xaddr = resolve_event_xaddr(self.host)
-                    sub_addr, expires = create_pull_subscription(event_xaddr)
-                    backoff = 2
-                    write_status(self.motion_dir, listening=True, lastError="")
-                started = time.time()
-                reply = pull_messages(sub_addr, timeout_sec=PULL_TIMEOUT_SEC)
-                expires = time.time() + 110
-                if event_looks_like_motion(reply):
-                    self.capture_snapshot("onvif")
-                self.maybe_prune()
-                self.maybe_reload()
-                elapsed = time.time() - started
-                if elapsed < MIN_PULL_PERIOD_SEC:
-                    time.sleep(MIN_PULL_PERIOD_SEC - elapsed)
-            except Exception as error:  # noqa: BLE001
-                write_status(
-                    self.motion_dir,
-                    listening=False,
-                    lastError=str(error.__class__.__name__),
-                )
-                if sub_addr:
-                    unsubscribe(sub_addr)
-                    sub_addr = None
-                time.sleep(backoff)
-                backoff = min(60, backoff * 2)
-        if sub_addr:
-            unsubscribe(sub_addr)
-        write_status(self.motion_dir, listening=False)
+            if now - self.last_prune >= PRUNE_EVERY_SEC:
+                self.prune()
+        for camera_id in list(self.workers):
+            self.stop_worker(camera_id)
         return 0
 
 
-def cmd_list(motion_dir: Path) -> int:
+def camera_names(config_dir: Path) -> dict:
+    library = load_json(config_dir / "config.json", {"cameras": []})
+    cameras = library.get("cameras") if isinstance(library, dict) else []
+    return {c["id"]: c.get("name") or "" for c in cameras or [] if isinstance(c, dict) and isinstance(c.get("id"), str)}
+
+
+def cmd_list(config_dir: Path, motion_dir: Path) -> int:
     ensure_dirs(motion_dir)
-    print(json.dumps(list_stills(motion_dir)))
+    settings = load_json(config_dir / "motion.json", {})
+    if not isinstance(settings, dict):
+        settings = {}
+    # Before the daemon migrates motion.json, the old single cameraId owns the root stills.
+    legacy = settings.get("legacyCameraId") or settings.get("cameraId") or ""
+    print(json.dumps(list_stills(motion_dir, camera_names(config_dir), legacy)))
     return 0
 
 
-def cmd_once(config_dir: Path, motion_dir: Path) -> int:
-    loop = MotionLoop(config_dir, motion_dir)
-    loop.reload()
-    path = loop.capture_snapshot("manual")
-    loop.maybe_prune(force=True)
+def cmd_status(config_dir: Path, motion_dir: Path) -> int:
+    """Daemon status for the gallery, with current camera names; accepts the old flat format."""
+    status = load_json(motion_dir / ".status.json", {})
+    if not isinstance(status, dict):
+        status = {}
+    names = camera_names(config_dir)
+    cameras = status.get("cameras")
+    if isinstance(cameras, dict):
+        for camera_id, entry in cameras.items():
+            if isinstance(entry, dict) and camera_id in names:
+                entry["name"] = names[camera_id]
+    print(json.dumps(status))
+    return 0
+
+
+def cmd_once(config_dir: Path, motion_dir: Path, camera_id: str) -> int:
+    supervisor = MotionSupervisor(config_dir, motion_dir)
+    plan = supervisor.plan()
+    if not camera_id and plan:
+        camera_id = next(iter(plan))
+    camera, source = plan.get(camera_id, (None, None))
+    kind = WORKER_KINDS.get(source["kind"]) if source else None
+    if kind is None:
+        print(json.dumps({"ok": False, "error": "no motion source"}))
+        return 1
+    worker = kind(camera, source, motion_dir, supervisor.board, supervisor.settings)
+    try:
+        path = worker.capture_now("manual")
+    except Exception as error:  # noqa: BLE001
+        print(json.dumps({"ok": False, "error": error.__class__.__name__}))
+        return 1
     print(json.dumps({"ok": bool(path), "path": str(path) if path else None}))
     return 0 if path else 1
 
@@ -634,34 +1031,30 @@ def cmd_once(config_dir: Path, motion_dir: Path) -> int:
 def cmd_prune(config_dir: Path, motion_dir: Path) -> int:
     library = load_json(config_dir / "config.json", {"cameras": [], "selectedId": ""})
     cfg = ensure_motion_config(config_dir, library if isinstance(library, dict) else {})
-    try:
-        hours = int(cfg.get("retentionHours") or DEFAULT_RETENTION_HOURS)
-    except (TypeError, ValueError):
-        hours = DEFAULT_RETENTION_HOURS
-    try:
-        max_files = int(cfg.get("maxFiles") or DEFAULT_MAX_FILES)
-    except (TypeError, ValueError):
-        max_files = DEFAULT_MAX_FILES
-    removed = prune_stills(motion_dir, hours, max_files)
-    print(json.dumps({"removed": removed}))
+    hours, max_files, _ = retention_settings(cfg)
+    print(json.dumps({"removed": prune_all(motion_dir, hours, max_files)}))
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="yani.camera motion still helper")
     parser.add_argument("--list", action="store_true", help="list saved stills as JSON")
+    parser.add_argument("--status", action="store_true", help="print listener status as JSON")
     parser.add_argument("--once", action="store_true", help="capture one snapshot now")
+    parser.add_argument("--camera", default="", help="camera id for --once")
     parser.add_argument("--prune-only", action="store_true", help="apply retention and exit")
     args = parser.parse_args(argv)
     config_dir, motion_dir = base_dirs()
     ensure_dirs(motion_dir)
     if args.list:
-        return cmd_list(motion_dir)
+        return cmd_list(config_dir, motion_dir)
+    if args.status:
+        return cmd_status(config_dir, motion_dir)
     if args.once:
-        return cmd_once(config_dir, motion_dir)
+        return cmd_once(config_dir, motion_dir, args.camera)
     if args.prune_only:
         return cmd_prune(config_dir, motion_dir)
-    return MotionLoop(config_dir, motion_dir).run()
+    return MotionSupervisor(config_dir, motion_dir).run()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,9 @@
-"""Tests for motiond prune / list / credential helpers (no network)."""
+"""Tests for motiond helpers, multi-camera storage and the DVRIP client (no real network)."""
+import json
 import os
+import socket
+import struct
+import threading
 import tempfile
 import time
 import unittest
@@ -113,6 +117,181 @@ class MotionEventTests(unittest.TestCase):
 
     def test_empty(self):
         self.assertFalse(motiond.event_looks_like_motion(self.wrap()))
+
+
+def _write(path: Path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
+
+
+BRIDGE = {"streams": {
+    "icsee": "dvrip://admin:p%40ss@192.0.2.3:34567?channel=0&subtype=0",
+    "icsee_baja": "dvrip://admin:p%40ss@192.0.2.3:34567?channel=0&subtype=1",
+    "icsee_plugin": "ffmpeg:icsee_baja#video=h264#audio=aac#input=icsee_input",
+    "loop_a": "loop_b", "loop_b": "loop_a",
+    "direct": "rtsp://192.0.2.9:554/user=u_password=pw_channel=0.sdp",
+}}
+
+
+class SourceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = Path(self.tmp.name)
+        _write(self.config / motiond.BRIDGE_CONFIG, BRIDGE)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_bridge_chain_resolves_to_dvrip(self):
+        source = motiond.motion_source(self.config, {"url": "rtsp://127.0.0.1:8554/icsee_plugin"})
+        self.assertEqual(source, {"kind": "dvrip", "host": "192.0.2.3", "port": 34567,
+                                  "user": "admin", "password": "p@ss"})
+
+    def test_bridge_to_rtsp_uses_onvif_on_real_host(self):
+        source = motiond.motion_source(self.config, {"url": "rtsp://127.0.0.1:8554/direct"})
+        self.assertEqual((source["kind"], source["host"], source["user"], source["password"]),
+                         ("onvif", "192.0.2.9", "u", "pw"))
+
+    def test_loopback_without_bridge_has_no_source(self):
+        for url in ("rtsp://127.0.0.1:8554/unknown", "rtsp://127.0.0.1:8554/loop_a"):
+            self.assertEqual(motiond.motion_source(self.config, {"url": url})["kind"], "none")
+
+    def test_direct_camera_uses_onvif(self):
+        source = motiond.motion_source(self.config, {"url": "rtsp://192.0.2.2:554/s", "username": "a", "password": "b"})
+        self.assertEqual((source["kind"], source["host"], source["user"]), ("onvif", "192.0.2.2", "a"))
+
+
+class MotionConfigTests(unittest.TestCase):
+    def test_single_camera_config_migrates_to_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp)
+            _write(config / "motion.json", {"enabled": True, "cameraId": "cam1", "maxFiles": 50})
+            data = motiond.ensure_motion_config(config, {})
+            self.assertEqual(data["cameraIds"], "all")
+            self.assertEqual(data["legacyCameraId"], "cam1")
+            self.assertNotIn("cameraId", data)
+            self.assertEqual(data["maxFiles"], 50)
+            self.assertEqual(json.loads((config / "motion.json").read_text())["cameraIds"], "all")
+            self.assertEqual(oct((config / "motion.json").stat().st_mode & 0o777), "0o600")
+
+    def test_monitored_cameras_filters_and_rejects_unsafe_ids(self):
+        library = {"cameras": [{"id": "a"}, {"id": "../etc"}, {"id": "b"}]}
+        self.assertEqual([c["id"] for c in motiond.monitored_cameras(library, {"cameraIds": "all"})], ["a", "b"])
+        self.assertEqual([c["id"] for c in motiond.monitored_cameras(library, {"cameraIds": ["b"]})], ["b"])
+        with self.assertRaises(ValueError):
+            motiond.camera_dir(Path("/tmp"), "../escape")
+
+
+class MultiCameraStorageTests(unittest.TestCase):
+    def test_list_attributes_legacy_and_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026-11-14_10-00-00.jpg").write_bytes(b"old")
+            (root / "cam2").mkdir()
+            (root / "cam2" / "2026-11-14_11-00-00.jpg").write_bytes(b"new")
+            os.utime(root / "2026-11-14_10-00-00.jpg", (1000, 1000))
+            os.utime(root / "cam2" / "2026-11-14_11-00-00.jpg", (2000, 2000))
+            items = motiond.list_stills(root, {"cam1": "Front", "cam2": "<b>Back</b>"}, "cam1")
+            self.assertEqual([(i["cameraId"], i["cameraName"]) for i in items],
+                             [("cam2", "<b>Back</b>"), ("cam1", "Front")])
+
+    def test_prune_applies_per_camera(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for folder in (root, root / "cam2"):
+                folder.mkdir(exist_ok=True)
+                for index in range(4):
+                    (folder / f"2026-11-14_10-00-0{index}.jpg").write_bytes(b"x")
+            motiond.prune_all(root, retention_hours=24, max_files=2)
+            self.assertEqual(len(list(root.glob("*.jpg"))), 2)
+            self.assertEqual(len(list((root / "cam2").glob("*.jpg"))), 2)
+
+    def test_status_board_tracks_cameras(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            board = motiond.StatusBoard(Path(tmp))
+            board.update("a", name="Front", listening=True)
+            board.update("b", name="Back", listening=False, lastError="ConnectionRefusedError")
+            board.keep_only({"a", "b"})
+            status = json.loads((Path(tmp) / ".status.json").read_text())
+            self.assertTrue(status["listening"])
+            self.assertEqual(status["camera"], "Front, Back")
+            self.assertEqual(status["lastError"], "ConnectionRefusedError")
+            board.keep_only({"a"})
+            status = json.loads((Path(tmp) / ".status.json").read_text())
+            self.assertEqual(list(status["cameras"]), ["a"])
+
+
+class DvripTests(unittest.TestCase):
+    def test_sofia_hash_known_value(self):
+        self.assertEqual(motiond.sofia_hash(""), "tlJwpbo6")
+
+    def test_alarm_parsing(self):
+        start = {"AlarmInfo": {"Event": "VideoMotion", "Status": "Start", "Channel": 0}}
+        self.assertTrue(motiond.alarm_is_motion_start(start))
+        self.assertFalse(motiond.alarm_is_motion_start({"AlarmInfo": {"Event": "VideoMotion", "Status": "Stop"}}))
+        self.assertFalse(motiond.alarm_is_motion_start({"AlarmInfo": {"Event": "StorageFailure", "Status": "Start"}}))
+        self.assertTrue(motiond.alarm_is_motion_start({"AlarmInfo": {"Event": "appEventHumanDetectAlarm", "Status": "Start"}}))
+
+    def test_worker_saves_still_on_alarm(self):
+        jpeg = b"\xff\xd8" + b"\x11" * 3000 + b"\xff\xd9"
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        seen = {}
+
+        def packet(msg, payload):
+            return motiond._DVRIP_HEADER.pack(255, 0, 7, 0, msg, len(payload)) + payload
+
+        def body(data):
+            return json.dumps(data).encode() + b"\x0a\x00"
+
+        def serve():
+            conn, _ = server.accept()
+            client = motiond.DvripClient("127.0.0.1", port, "", "")
+            client.sock = conn
+            try:
+                msg, data = client.recv()
+                seen["login"] = motiond.dvrip_json(data)
+                conn.sendall(packet(1001, body({"Ret": 100, "SessionID": "0x00000007", "AliveInterval": 30})))
+                msg, data = client.recv()
+                seen["guard"] = msg
+                conn.sendall(packet(1501, body({"Ret": 100})))
+                conn.sendall(packet(1504, body({"AlarmInfo": {"Event": "VideoMotion", "Status": "Start"}})))
+                msg, data = client.recv()
+                seen["snapshot"] = motiond.dvrip_json(data)
+                conn.sendall(packet(1561, jpeg[:1000]) + packet(1561, jpeg[1000:]))
+                conn.recv(1024)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        with tempfile.TemporaryDirectory() as tmp:
+            motion = Path(tmp)
+            board = motiond.StatusBoard(motion)
+            source = {"kind": "dvrip", "host": "127.0.0.1", "port": port, "user": "admin", "password": ""}
+            worker = motiond.DvripWorker({"id": "cam2", "name": "Back"}, source, motion, board, {"minIntervalSec": 5})
+            worker.start()
+            deadline = time.time() + 5
+            while time.time() < deadline and not list((motion / "cam2").glob("*.jpg")):
+                time.sleep(0.05)
+            worker.stop_event.set()
+            worker.join(timeout=5)
+            server.close()
+            stills = list((motion / "cam2").glob("*.jpg"))
+            self.assertEqual(len(stills), 1, "alarm produced one still")
+            self.assertEqual(stills[0].read_bytes(), jpeg, "multi-packet JPEG reassembled")
+            self.assertEqual(oct(stills[0].stat().st_mode & 0o777), "0o600")
+            self.assertEqual(seen["login"]["PassWord"], "tlJwpbo6")
+            self.assertEqual(seen["login"]["UserName"], "admin")
+            self.assertEqual(seen["guard"], motiond.DVRIP_GUARD)
+            self.assertEqual(seen["snapshot"]["Name"], "OPSNAP")
+            status = json.loads((motion / ".status.json").read_text())
+            self.assertEqual(status["cameras"]["cam2"]["source"], "dvrip")
+            self.assertEqual(status["cameras"]["cam2"].get("lastError"), "")
 
 
 if __name__ == "__main__":

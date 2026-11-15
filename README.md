@@ -62,10 +62,20 @@ when installed, otherwise Inter, otherwise the Omarchy font.
 
 ## Functionality changes
 
-- **Motion still gallery** — **Live / Motion** in the toolbar. `motiond.py`
-  captures via ONVIF PullPoint (HTTP snapshot fallback). Files in
-  `~/.local/share/rtsp-camera/motion/` (0700), pruned at **24h** or **400
-  files**. Retention/camera in `motion.json` (0600). Optional user unit:
+- **Motion still gallery (every camera)** — **Live / Motion** in the toolbar.
+  `motiond.py` runs one listener per saved camera:
+  - cameras reachable directly use ONVIF PullPoint events plus a snapshot;
+  - XMeye/iCSee cameras behind the local go2rtc bridge
+    (`rtsp://127.0.0.1:8554/<stream>`) are resolved through
+    `go2rtc.private.json` to their `dvrip://` source and use DVRIP alarms plus
+    a DVRIP snapshot (no transcoding).
+
+  Stills go to `~/.local/share/rtsp-camera/motion/<camera id>/` (0700, files
+  0600). Each camera keeps at most **24h** / **400 files**; stills from before
+  per-camera folders stay in the top folder and belong to the first motion
+  camera. `motion.json` (0600) has `"cameraIds": "all"` (default, includes
+  cameras added later) or a list of ids. The gallery filters by camera and
+  shows a listener chip (hover for each camera's state). Optional user unit:
   [`contrib/yani-camera-motion.service`](contrib/yani-camera-motion.service).
 
   ```sh
@@ -74,14 +84,12 @@ when installed, otherwise Inter, otherwise the Omarchy font.
   systemctl --user enable --now yani-camera-motion.service
   ```
 
-  Without the service you can still browse stills already on disk; opening
-  **Motion** only lists files, it does not start the loop.
+  Debug: `python3 motiond.py --status`, or `python3 motiond.py --once --camera <id>`
+  to save one still now. Without the service you can still browse stills already on
+  disk; opening **Motion** only lists files, it does not start the loop.
 
 - **Stream pauses for the gallery** — player tears down while Motion is open;
   **Live** reconnects.
-
-- **Auto-bind** — first run binds the gallery to the selected camera
-  (`selectedId`), else the first profile.
 
 - **Pinned input mask** — `CameraPopup.extraInput` is unioned into the
   layer-shell `Region`, so dropdown rows that hang past the card stay
@@ -93,7 +101,8 @@ when installed, otherwise Inter, otherwise the Omarchy font.
   so they aren’t shadowed by Omarchy’s `qs.Ui.Button` (no `contentItem` /
   `hovered`).
 
-- **Tests** — `test_motiond.py` (prune/list/creds, no network) + existing
+- **Tests** — `test_motiond.py` (prune/list/creds, bridge resolution, per-camera
+  storage, a fake DVRIP camera; no network) + existing
   `test_config.py`. `.gitignore` also excludes `motion.json`,
   `appearance.json`, `position-*.json`, `.profiles.lock`, `.status.json`.
 

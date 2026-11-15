@@ -66,5 +66,16 @@
   "motion.starting": "Listener starting…",
   "motion.closePreview": "Close",
   "motion.newer": "Newer",
-  "motion.older": "Older"
+  "motion.older": "Older",
+  "motion.all": "All",
+  "motion.unknownCamera": "Camera",
+  "motion.listeningCount": {
+    "one": "Listening · %1 camera",
+    "other": "Listening · %1 cameras"
+  },
+  "motion.cameraDown": "%1 not listening",
+  "motion.cameraListening": "%1 — listening",
+  "motion.cameraOffline": "%1 — offline (%2)",
+  "motion.cameraStarting": "%1 — starting",
+  "motion.cameraNoSource": "%1 — no motion source"
 }

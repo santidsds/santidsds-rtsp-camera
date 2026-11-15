@@ -225,6 +225,7 @@ ShellRoot {
             assertOk(field("motionSubtitle").text.indexOf("2") === 0, "subtitle counts the stills")
             var caption = find(gallery, function(i) { return typeof i.text === "string" && i.text.indexOf(markup) >= 0 })
             assertOk(caption !== null && caption.textFormat === Text.PlainText, "still captions stay plain text")
+            assertOk(!field("motionCameraFilter").visible, "no camera filter with a single camera")
             gallery.selectedIndex = 0
             gallery.forceActiveFocus()
             assertOk(field("motionPreview").visible, "viewer opens on a still")
@@ -236,11 +237,39 @@ ShellRoot {
             equal(gallery.selectedIndex, 0, "left arrow shows the previous still")
             keyClick(Qt.Key_Escape)
             assertOk(gallery.selectedIndex === -1 && panel.showingMotion, "Esc closes the viewer first")
+            // Several cameras: filter and per-still camera names.
+            var cameraMarkup = "<b>Back</b>"
+            gallery.items = [
+                {name: "c.jpg", path: "/nonexistent/c.jpg", time: "23:00:00", date: gallery.today, cameraId: "front", cameraName: "Front"},
+                {name: "d.jpg", path: "/nonexistent/d.jpg", time: "22:00:00", date: gallery.today, cameraId: "back", cameraName: cameraMarkup},
+                {name: "e.jpg", path: "/nonexistent/e.jpg", time: "21:00:00", date: gallery.today, cameraId: "back", cameraName: cameraMarkup}]
+            wait(150)
+            var filter = field("motionCameraFilter")
+            assertOk(filter.visible && filter.model.length === 3, "camera filter offers All plus each camera")
+            var nameLabel = find(gallery, function(i) { return i.objectName === "stillCameraName" && i.text === cameraMarkup })
+            assertOk(nameLabel !== null && nameLabel.visible && nameLabel.textFormat === Text.PlainText,
+                "stills name their camera in plain text")
+            mouseClick(find(filter, function(i) { return i.text === cameraMarkup && i.clicked !== undefined }))
+            assertOk(gallery.visibleItems.length === 2 && gallery.activeFilter === "back", "filter shows one camera's stills")
+            assertOk(field("motionSubtitle").text.indexOf("2") === 0, "subtitle counts the filtered stills")
+            assertOk(!find(gallery, function(i) { return i.objectName === "stillCameraName" && i.visible }),
+                "camera names hide while filtered to one camera")
+            mouseClick(find(filter, function(i) { return i.text === "All" && i.clicked !== undefined }))
+            equal(gallery.visibleItems.length, 3, "All shows every camera")
+            // Listener status: per-camera format and the older flat one.
+            var mixed = gallery.summarizeStatus({enabled: true, cameras: {
+                front: {name: "Front", listening: true}, back: {name: "Back", listening: false, lastError: "ConnectionRefusedError"}}})
+            assertOk(mixed.state === "partial" && mixed.line.indexOf("Back") >= 0 && mixed.details.indexOf("ConnectionRefusedError") >= 0,
+                "one camera down shows a partial status naming it")
+            var both = gallery.summarizeStatus({cameras: {front: {name: "Front", listening: true}, back: {name: "Back", listening: true}}})
+            assertOk(both.state === "on" && both.line.indexOf("2") >= 0, "all cameras listening")
+            equal(gallery.summarizeStatus({listening: true, camera: "Camera 1"}).state, "on", "older flat status still reads")
+            equal(gallery.summarizeStatus({enabled: false}).state, "disabled", "disabled capture")
             keyClick(Qt.Key_Escape)
             assertOk(!panel.showingMotion, "second Esc returns to live view")
             panel.close()
             panel.configured = false
-            console.log("PASS: gallery empty state, grid, plain captions, viewer navigation and Esc")
+            console.log("PASS: gallery empty state, grid, plain captions, viewer navigation, camera filter, listener status and Esc")
         }
         function runDualView() {
             panel.close()

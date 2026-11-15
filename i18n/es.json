@@ -66,5 +66,16 @@
   "motion.starting": "Iniciando detector…",
   "motion.closePreview": "Cerrar",
   "motion.newer": "Más reciente",
-  "motion.older": "Más antigua"
+  "motion.older": "Más antigua",
+  "motion.all": "Todas",
+  "motion.unknownCamera": "Cámara",
+  "motion.listeningCount": {
+    "one": "Escuchando · %1 cámara",
+    "other": "Escuchando · %1 cámaras"
+  },
+  "motion.cameraDown": "%1 sin escuchar",
+  "motion.cameraListening": "%1 — escuchando",
+  "motion.cameraOffline": "%1 — desconectada (%2)",
+  "motion.cameraStarting": "%1 — iniciando",
+  "motion.cameraNoSource": "%1 — sin fuente de movimiento"
 }
