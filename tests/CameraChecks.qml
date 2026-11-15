@@ -343,10 +343,17 @@ ShellRoot {
             equal(secondary.camera.id, second.id, "enlarged tile keeps its own camera")
             assertOk(primary.status().playing && primary.status().muted, "hidden tile stays connected and muted")
             var focusedFrames = secondary.framesReceived
-            wait(400)
+            // Longer than the 5 s stall watchdog: the hidden tile must not reconnect.
+            wait(6000)
             assertOk(secondary.framesReceived > focusedFrames, "enlarged camera keeps streaming")
+            assertOk(primary.status().playing, "hidden tile is still playing after the watchdog period")
+            // On some outputs a hidden VideoOutput gets no frames; its watchdog must not count that as a stall.
+            var hiddenWatchdog = find(primary, function(i) { return i.interval === 5000 && i.triggered !== undefined })
+            hiddenWatchdog.triggered()
+            assertOk(!primary.status().reconnectPending && primary.status().playing, "watchdog ignores a hidden tile")
             panel.exitFullscreenIfActive(null)
             equal(state().viewMode, "dual", "escape restores both cameras")
+            assertOk(hiddenWatchdog.running, "tile shown again gets a fresh watchdog period")
             assertOk(primary.visible && secondary.visible && primary.live && secondary.live, "both tiles return live")
             // Full screen from the toolbar keeps both; a tile button then focuses that camera.
             panel.toggleFullscreen()
@@ -362,6 +369,24 @@ ShellRoot {
                 w[0].playbackMessageChanged.disconnect(w[2])
             })
             equal(reconnects.join("; "), "", "enlarging and restoring never reconnects")
+            // Full screen pins the card only while it lasts. Unpinned steps stay in
+            // one tick, so no dismissal surface ever maps on other outputs.
+            panel.pinned = false
+            panel.toggleFullscreen()
+            var pinnedDuring = panel.pinned
+            panel.exitFullscreenIfActive(null)
+            var pinnedAfter = panel.pinned
+            panel.pinned = true
+            assertOk(pinnedDuring && !pinnedAfter, "leaving full screen restores an unpinned viewer")
+            var gridPopup = find(panel, function(i) { return i.cardOrigin !== undefined })
+            gridPopup.movePinned(120, 140)
+            var pinnedOrigin = Qt.point(gridPopup.cardOrigin.x, gridPopup.cardOrigin.y)
+            panel.toggleFullscreen()
+            wait(50)
+            panel.exitFullscreenIfActive(null)
+            wait(50)
+            assertOk(panel.pinned && gridPopup.cardOrigin.x === pinnedOrigin.x && gridPopup.cardOrigin.y === pinnedOrigin.y,
+                "a pinned viewer stays pinned at its position")
             mouseClick(dualButton)
             assertOk(!panel.dualView && !secondary.streaming, "Dual button returns to individual view")
             mouseClick(dualButton)

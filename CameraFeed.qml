@@ -88,13 +88,17 @@ Item {
         receivedFrame = false
         framesReceived = 0
         playbackMessage = "Connecting…"
+        logEvent(resetRetry === false ? "Retrying." : "Connecting.")
         player.source = streamUrl()
         changingPlayback = false
         connectionTimeout.restart()
         player.play()
     }
+    // One line per (re)connection, with the camera name only: URLs carry credentials.
+    function logEvent(text) { console.info("yani.camera [" + (camera.name || "Camera") + "]: " + text) }
     function scheduleReconnect(reason) {
         if (!streaming || changingPlayback || reconnectTimer.running) return
+        logEvent(reason + " Reconnecting.")
         frameWatchdog.stop()
         connectionTimeout.stop()
         changingPlayback = true
@@ -155,8 +159,12 @@ Item {
     Timer {
         id: frameWatchdog
         interval: 5000
-        onTriggered: root.scheduleReconnect("Video stalled.")
+        // A hidden tile (another camera enlarged) may not be handed frames,
+        // so only a visible tile can be judged stalled.
+        onTriggered: if (root.visible) root.scheduleReconnect("Video stalled.")
     }
+    // Back on screen: give the stream a full watchdog period to show frames.
+    onVisibleChanged: if (visible && streaming && receivedFrame && !reconnectTimer.running) frameWatchdog.restart()
     Timer {
         id: connectionTimeout
         interval: 20000

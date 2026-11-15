@@ -62,7 +62,17 @@ Panel {
         && (focusedCameraId === (primaryCamera.id || "") || focusedCameraId === (secondaryCamera.id || ""))
         ? focusedCameraId : ""
     readonly property bool dualActive: dualStreaming && focusId === ""
-    onFullscreenChanged: if (!fullscreen) focusedCameraId = ""
+    // Full screen pins the card so it can sit centered; leaving restores the
+    // pin state and position the viewer had before.
+    property bool pinnedBeforeFullscreen: false
+    property point originBeforeFullscreen: Qt.point(0, 0)
+    onFullscreenChanged: {
+        if (fullscreen) return
+        focusedCameraId = ""
+        // Raw origin: cardOrigin bounds it against the card size it has once restored.
+        if (pinnedBeforeFullscreen) popup.pinnedOrigin = originBeforeFullscreen
+        else pinned = false
+    }
 
     function toggleDualView() {
         fullscreen = false
@@ -101,6 +111,10 @@ Panel {
     }
     function toggleFullscreen() {
         if (!configured || configuring || showingMotion) return
+        if (!fullscreen) {
+            pinnedBeforeFullscreen = pinned
+            originBeforeFullscreen = popup.pinnedOrigin
+        }
         fullscreen = !fullscreen
         if (fullscreen) {
             pinned = true
