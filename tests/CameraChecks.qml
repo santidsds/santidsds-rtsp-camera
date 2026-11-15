@@ -288,14 +288,51 @@ ShellRoot {
             assertOk(dualButton.mapToItem(parent,0,0).x >= 0, "narrow header stays within the viewer")
             capture(parent, "dual-narrow")
             panel.viewerWidth = 1000; panel.viewerHeight = 550
+            eventually(function() { return primary.live && secondary.live }, 5000)
+            // Any reconnect resets the frame counter or shows a connection message.
+            var reconnects = []
+            var lastFrames = [primary.framesReceived, secondary.framesReceived]
+            var watchers = [primary, secondary].map(function(feed, index) {
+                var onFrames = function() {
+                    if (feed.framesReceived < lastFrames[index]) reconnects.push(feed.objectName + " frames reset")
+                    lastFrames[index] = feed.framesReceived
+                }
+                var onMessage = function() {
+                    if (feed.playbackMessage !== "") reconnects.push(feed.objectName + ": " + feed.playbackMessage)
+                }
+                feed.framesReceivedChanged.connect(onFrames)
+                feed.playbackMessageChanged.connect(onMessage)
+                return [feed, onFrames, onMessage]
+            })
+            if (secondary.status().muted) { mouseClick(audio2); wait(80) }
+            assertOk(!secondary.status().muted, "second tile plays audio before focusing")
             var expand = find(secondary, function(i) { return i.objectName === "fullscreenButton" })
             mouseClick(expand)
-            eventually(function() { return panel.fullscreen && primary.camera.id === second.id }, 1000)
+            eventually(function() { return panel.fullscreen && panel.focusId === second.id }, 1000)
             equal(state().viewMode, "focus", "enlarge the second camera")
-            assertOk(!secondary.streaming && !secondary.status().playing, "hidden tile releases its stream")
+            assertOk(secondary.visible && !primary.visible, "only the enlarged camera is shown")
+            equal(secondary.camera.id, second.id, "enlarged tile keeps its own camera")
+            assertOk(primary.status().playing && primary.status().muted, "hidden tile stays connected and muted")
+            var focusedFrames = secondary.framesReceived
+            wait(400)
+            assertOk(secondary.framesReceived > focusedFrames, "enlarged camera keeps streaming")
             panel.exitFullscreenIfActive(null)
-            eventually(function() { return primary.live && secondary.live }, 5000)
             equal(state().viewMode, "dual", "escape restores both cameras")
+            assertOk(primary.visible && secondary.visible && primary.live && secondary.live, "both tiles return live")
+            // Full screen from the toolbar keeps both; a tile button then focuses that camera.
+            panel.toggleFullscreen()
+            assertOk(panel.fullscreen && state().viewMode === "dual", "toolbar full screen shows both cameras")
+            mouseClick(find(primary, function(i) { return i.objectName === "fullscreenButton" }))
+            assertOk(panel.fullscreen && panel.focusId === first.id && !secondary.visible && secondary.status().muted,
+                "tile button in dual full screen focuses that camera and mutes the other")
+            mouseClick(find(primary, function(i) { return i.objectName === "fullscreenButton" }))
+            assertOk(!panel.fullscreen && state().viewMode === "dual", "focused tile button leaves full screen")
+            wait(400)
+            watchers.forEach(function(w) {
+                w[0].framesReceivedChanged.disconnect(w[1])
+                w[0].playbackMessageChanged.disconnect(w[2])
+            })
+            equal(reconnects.join("; "), "", "enlarging and restoring never reconnects")
             mouseClick(dualButton)
             assertOk(!panel.dualView && !secondary.streaming, "Dual button returns to individual view")
             mouseClick(dualButton)

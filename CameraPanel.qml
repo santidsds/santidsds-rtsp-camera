@@ -52,10 +52,16 @@ Panel {
     readonly property bool live: primaryFeed.live
     property bool dualView: true
     property string focusedCameraId: ""
-    readonly property bool dualActive: dualView && cameras.length > 1 && !focusedCameraId
-    readonly property var primaryCamera: focusedCameraId
-        ? cameras.find(function(camera) { return camera.id === root.focusedCameraId }) || config : config
-    readonly property var secondaryCamera: cameras.find(function(camera) { return camera.id !== root.primaryCamera.id }) || ({})
+    // Each player stays bound to its own camera; enlarging one only hides the
+    // other tile, so neither stream reconnects on the way in or out.
+    readonly property bool dualStreaming: dualView && cameras.length > 1
+    readonly property var primaryCamera: config
+    readonly property var secondaryCamera: cameras.find(function(camera) { return camera.id !== root.config.id }) || ({})
+    // A focus that no longer matches a tile (e.g. another camera was picked) is ignored.
+    readonly property string focusId: focusedCameraId !== "" && dualStreaming
+        && (focusedCameraId === (primaryCamera.id || "") || focusedCameraId === (secondaryCamera.id || ""))
+        ? focusedCameraId : ""
+    readonly property bool dualActive: dualStreaming && focusId === ""
     onFullscreenChanged: if (!fullscreen) focusedCameraId = ""
 
     function toggleDualView() {
@@ -64,7 +70,15 @@ Panel {
         dualView = !dualView
     }
     function enlargeCamera(id) {
-        if (dualActive) focusedCameraId = id
+        // In dual view (windowed or full screen) a tile's button focuses that
+        // camera; on the focused tile, or in single view, it toggles full screen.
+        if (dualStreaming && id && focusId !== id) {
+            focusedCameraId = id
+            if (id === (primaryCamera.id || "")) secondaryFeed.mute()
+            else primaryFeed.mute()
+            if (!fullscreen) toggleFullscreen()
+            return
+        }
         toggleFullscreen()
     }
     function play(resetRetry) { primaryFeed.play(resetRetry) }
@@ -190,8 +204,8 @@ Panel {
             positionSaveError: positionSaveError,
             cameraCount: cameras.length, selectedCameraId: selectedCameraId,
             showingMotion: showingMotion,
-            viewMode: dualActive ? "dual" : focusedCameraId ? "focus" : "single",
-            feeds: dualActive ? [primaryFeed.status(), secondaryFeed.status()] : [primaryFeed.status()]}))
+            viewMode: dualActive ? "dual" : focusId ? "focus" : "single",
+            feeds: dualStreaming ? [primaryFeed.status(), secondaryFeed.status()] : [primaryFeed.status()]}))
     }
     function resizeViewer(width, height) {
         viewerWidth = Math.round(Math.min(popup.availableCardWidth, Math.max(420, width)))
@@ -435,7 +449,8 @@ Panel {
         readonly property real liveNaturalHeight: {
             var width = feedGrid.width
             if (width <= 0) return root.viewerHeight
-            var grid = width / primaryFeed.aspect
+            var lead = root.focusId !== "" && root.focusId === (root.secondaryCamera.id || "") ? secondaryFeed : primaryFeed
+            var grid = width / lead.aspect
             if (root.dualActive && feedGrid.columns === 2) {
                 var column = (width - feedGrid.columnSpacing) / 2
                 grid = Math.max(column / primaryFeed.aspect, column / secondaryFeed.aspect)
@@ -790,13 +805,14 @@ Panel {
                             CameraFeed {
                                 id: primaryFeed
                                 objectName: "primaryFeed"
+                                visible: root.focusId === "" || root.focusId === (root.primaryCamera.id || "")
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 Layout.preferredWidth: 1
                                 Layout.preferredHeight: 1
                                 camera: root.primaryCamera
                                 streaming: root.streaming
-                                compact: root.dualActive
+                                compact: root.dualActive || root.focusId !== ""
                                 fullscreen: root.fullscreen
                                 videoStyle: root.editingAppearance ? root.videoStyles[videoStyleChooser.currentIndex] : root.videoStyle
                                 tintStrength: root.editingAppearance ? tintSlider.value : root.tintStrength
@@ -809,14 +825,15 @@ Panel {
                             CameraFeed {
                                 id: secondaryFeed
                                 objectName: "secondaryFeed"
-                                visible: root.dualActive
+                                visible: root.dualActive || (root.focusId !== "" && root.focusId === (root.secondaryCamera.id || ""))
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 Layout.preferredWidth: 1
                                 Layout.preferredHeight: 1
                                 camera: root.secondaryCamera
-                                streaming: root.streaming && root.dualActive
+                                streaming: root.streaming && root.dualStreaming
                                 compact: true
+                                fullscreen: root.fullscreen
                                 videoStyle: primaryFeed.videoStyle
                                 tintStrength: primaryFeed.tintStrength
                                 pixelSize: primaryFeed.pixelSize

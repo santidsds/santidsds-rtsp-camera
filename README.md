@@ -20,7 +20,8 @@ shows RTSP camera feeds in a themed, pinnable card on your desktop.
 - **Dual view** — shows the selected camera and a second saved camera together.
   Wide cards place them side by side; narrow cards stack them. The split-view button toggles
   the individual view. Each tile reconnects independently; audio plays from
-  one camera at a time. Use a tile's **⛶** to enlarge it, then Esc to return.
+  one camera at a time. Use a tile's **⛶** to enlarge it, then Esc to return;
+  both cameras stay connected, so enlarging and returning are instant.
 - **Pin** — the pin button keeps the card above other windows; drag the empty
   toolbar to move it.
   Chrome fades when the pointer leaves; hover brings it back. Pin resets on close.
