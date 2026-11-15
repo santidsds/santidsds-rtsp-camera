@@ -255,11 +255,14 @@ Item {
             onClicked: root.audioRequested()
         }
         // Connection progress: a glass capsule with a spinner while connecting.
+        // Sized from the frame only: binding to its own contents would loop.
         Rectangle {
+            id: messageCapsule
             objectName: "playbackMessage"
+            readonly property real maxWidth: Math.max(0, frame.width - 32)
             anchors.centerIn: parent
             visible: root.playbackMessage !== ""
-            width: Math.min(parent.width - 32, messageRow.implicitWidth + 28)
+            width: Math.min(maxWidth, messageRow.implicitWidth + 28)
             height: messageRow.implicitHeight + 16
             radius: height / 2
             color: ui.glass
@@ -268,7 +271,6 @@ Item {
             Row {
                 id: messageRow
                 anchors.centerIn: parent
-                width: Math.min(implicitWidth, parent.width - 28)
                 spacing: 8
                 Text {
                     id: spinner
@@ -288,7 +290,7 @@ Item {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    width: Math.min(implicitWidth, messageRow.parent.width - 28 - (spinner.visible ? spinner.width + 8 : 0))
+                    width: Math.min(implicitWidth, Math.max(0, messageCapsule.maxWidth - 28 - (spinner.visible ? spinner.width + 8 : 0)))
                     textFormat: Text.PlainText
                     text: root.playbackMessage
                     font.family: ui.font

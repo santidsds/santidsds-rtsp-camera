@@ -335,6 +335,12 @@ ShellRoot {
             eventually(function() { return offlineFeed.connectionState === "offline" }, 4000)
             equal(offlineFeed.statusColor.toString(), "#ff453a", "offline camera shows a red status dot")
             equal(field("headerStatusDot").color.toString(), "#ff453a", "toolbar dot mirrors the offline state")
+            var capsule = find(offlineFeed, function(i) { return i.objectName === "playbackMessage" })
+            var videoFrame = find(offlineFeed, function(i) { return i.objectName === "videoFrame" })
+            assertOk(capsule.visible && capsule.width > 40, "connection message has a real width")
+            var capsuleCenter = capsule.mapToItem(videoFrame, capsule.width / 2, capsule.height / 2)
+            assertOk(Math.abs(capsuleCenter.x - videoFrame.width / 2) < 1 && Math.abs(capsuleCenter.y - videoFrame.height / 2) < 1,
+                "connection message is centered on the video")
             capture(content, "offline-feed")
             var firstId = panel.selectedCameraId
             panel.editSettings(true)
