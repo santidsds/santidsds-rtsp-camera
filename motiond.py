@@ -19,6 +19,7 @@ import signal
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -228,11 +229,28 @@ def write_status(motion_dir: Path, **fields):
     os.replace(tmp, path)
 
 
+_HTTP_LOCAL = threading.local()
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    """One opener per thread, built once.
+
+    Building an opener (and an SSL context) for every request made glibc
+    fragment the heap: with a camera that answers PullMessages instantly the
+    loop runs about once a second and RSS grew ~9 MB a minute. The HTTPS
+    context is created here too, once per thread, for https snapshot URLs.
+    """
+    opener = getattr(_HTTP_LOCAL, "opener", None)
+    if opener is None:
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        _HTTP_LOCAL.opener = opener
+    return opener
+
+
 def _http(method: str, url: str, data: bytes | None = None, headers: dict | None = None) -> bytes:
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-    context = ssl.create_default_context()
-    # LAN cameras often use self-signed certs on 8443; we only use http here.
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT, context=context) as resp:
+    with _opener().open(req, timeout=HTTP_TIMEOUT) as resp:
         return resp.read()
 
 
