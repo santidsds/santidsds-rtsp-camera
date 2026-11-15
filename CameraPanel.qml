@@ -18,6 +18,9 @@ Panel {
     property var hostWidget: null
     property bool configuring: true
     property bool showingMotion: false
+    property bool showingRecordings: false
+    // Motion and Recordings replace the live view (its streams stop meanwhile).
+    readonly property bool browsing: showingMotion || showingRecordings
     property bool fullscreen: false
     property bool pinned: false
     property bool configured: false
@@ -48,7 +51,7 @@ Panel {
     property var config: ({url: "rtsp://", username: "", password: ""})
     readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
     readonly property string configPath: (Quickshell.env("XDG_CONFIG_HOME") || Quickshell.env("HOME") + "/.config") + "/rtsp-camera/config.json"
-    readonly property bool streaming: opened && !configuring && !showingMotion && configured
+    readonly property bool streaming: opened && !configuring && !browsing && configured
     readonly property bool live: primaryFeed.live
     property bool dualView: true
     property string focusedCameraId: ""
@@ -104,13 +107,25 @@ Panel {
         editingAppearance = false
         fullscreen = false
         configuring = false
+        showingRecordings = false
         showingMotion = true
     }
     function closeMotionGallery() {
         showingMotion = false
     }
+    function openRecordings() {
+        if (!configured) return
+        editingAppearance = false
+        fullscreen = false
+        configuring = false
+        showingMotion = false
+        showingRecordings = true
+    }
+    function closeRecordings() {
+        showingRecordings = false
+    }
     function toggleFullscreen() {
-        if (!configured || configuring || showingMotion) return
+        if (!configured || configuring || browsing) return
         if (!fullscreen) {
             pinnedBeforeFullscreen = pinned
             originBeforeFullscreen = popup.pinnedOrigin
@@ -135,6 +150,7 @@ Panel {
     function editSettings(newCamera) {
         editingAppearance = false
         showingMotion = false
+        showingRecordings = false
         fullscreen = false
         editingCameraId = newCamera === true ? "" : selectedCameraId
         cameraName.text = newCamera === true ? "" : selectedCameraIndex >= 0 ? cameras[selectedCameraIndex].name : "Camera 1"
@@ -218,6 +234,7 @@ Panel {
             positionSaveError: positionSaveError,
             cameraCount: cameras.length, selectedCameraId: selectedCameraId,
             showingMotion: showingMotion,
+            showingRecordings: showingRecordings,
             viewMode: dualActive ? "dual" : focusId ? "focus" : "single",
             feeds: dualStreaming ? [primaryFeed.status(), secondaryFeed.status()] : [primaryFeed.status()]}))
     }
@@ -244,6 +261,7 @@ Panel {
         if (!opened) {
             editingAppearance = false
             showingMotion = false
+            showingRecordings = false
             fullscreen = false
             writer.stayInSettings = false
             pinned = false
@@ -255,6 +273,7 @@ Panel {
         if (opened) {
             configuring = !configured
             showingMotion = false
+            showingRecordings = false
             fullscreen = false
             if (configuring) editSettings()
         }
@@ -476,7 +495,7 @@ Panel {
             return chromeHeight + grid + editor
         }
         readonly property real pageNaturalHeight: root.configuring ? chromeHeight + settingsColumn.implicitHeight
-            : root.showingMotion ? root.viewerHeight : liveNaturalHeight
+            : root.browsing ? root.viewerHeight : liveNaturalHeight
         contentHeight: root.fullscreen
             ? popup.availableCardHeight
             // The appearance inspector grows the card to fit while it is open.
@@ -491,6 +510,11 @@ Panel {
                 if (root.exitFullscreenIfActive(event)) return
                 if (root.showingMotion) {
                     root.closeMotionGallery()
+                    event.accepted = true
+                    return
+                }
+                if (root.showingRecordings) {
+                    root.closeRecordings()
                     event.accepted = true
                     return
                 }
@@ -540,7 +564,7 @@ Panel {
                             id: cameraSelector
                             objectName: "cameraSelector"
                             readonly property real naturalWidth: 18 + selectorName.advanceWidth + 7 + 14
-                                + (root.configured && !root.configuring && !root.showingMotion ? 8 + 7 : 0)
+                                + (root.configured && !root.configuring && !root.browsing ? 8 + 7 : 0)
                             TextMetrics {
                                 id: selectorName
                                 font.family: ui.font
@@ -570,7 +594,7 @@ Panel {
                                     StatusDot {
                                         id: selectorDot
                                         objectName: "headerStatusDot"
-                                        visible: root.configured && !root.configuring && !root.showingMotion
+                                        visible: root.configured && !root.configuring && !root.browsing
                                         anchors.verticalCenter: parent.verticalCenter
                                         tone: primaryFeed.statusColor
                                         pulsing: primaryFeed.connecting
@@ -725,13 +749,13 @@ Panel {
                         MacSegmented {
                             id: viewModeControl
                             objectName: "viewModeControl"
-                            model: [strings.t("view.live"), strings.t("view.motion")]
-                            icons: headerControls.compact ? [ui.iconLive, ui.iconMotion] : []
-                            tips: [strings.t("view.liveTip"), strings.t("view.motionTip")]
-                            segmentNames: ["liveButton", "motionButton"]
+                            model: [strings.t("view.live"), strings.t("view.motion"), strings.t("view.recordings")]
+                            icons: headerControls.compact ? [ui.iconLive, ui.iconMotion, ui.iconHistory] : []
+                            tips: [strings.t("view.liveTip"), strings.t("view.motionTip"), strings.t("view.recordingsTip")]
+                            segmentNames: ["liveButton", "motionButton", "recordingsButton"]
                             iconOnly: headerControls.compact
                             autoSelect: false
-                            currentIndex: root.configuring ? -1 : root.showingMotion ? 1 : 0
+                            currentIndex: root.configuring ? -1 : root.showingMotion ? 1 : root.showingRecordings ? 2 : 0
                             enabled: !writer.running && root.configured
                             opacity: enabled ? 1 : 0.5
                             onActivated: function(index) {
@@ -739,7 +763,12 @@ Panel {
                                     root.openMotionGallery()
                                     return
                                 }
+                                if (index === 2) {
+                                    root.openRecordings()
+                                    return
+                                }
                                 root.closeMotionGallery()
+                                root.closeRecordings()
                                 if (root.configuring && root.configured) {
                                     password.text = ""
                                     root.configuring = false
@@ -753,7 +782,7 @@ Panel {
                                 glyph: ui.iconSplit
                                 tipText: root.dualView ? strings.t("layout.showSingle") : strings.t("layout.showBoth")
                                 Accessible.name: strings.t("layout.twoCameras")
-                                visible: !root.configuring && !root.showingMotion
+                                visible: !root.configuring && !root.browsing
                                 enabled: root.cameras.length > 1
                                 checked: root.dualView && root.cameras.length > 1
                                 onClicked: root.toggleDualView()
@@ -762,7 +791,7 @@ Panel {
                                 objectName: "themeButton"
                                 glyph: ui.iconPalette
                                 tipText: strings.t("toolbar.appearance")
-                                visible: !root.configuring && !root.showingMotion
+                                visible: !root.configuring && !root.browsing
                                 checked: root.editingAppearance
                                 onClicked: root.toggleAppearance()
                             }
@@ -783,7 +812,7 @@ Panel {
                                 objectName: "fullscreenToolbarButton"
                                 glyph: root.fullscreen ? ui.iconFullscreenExit : ui.iconFullscreen
                                 tipText: root.fullscreen ? strings.t("window.exitFullScreen") : strings.t("window.fullScreen")
-                                visible: !root.configuring && !root.showingMotion
+                                visible: !root.configuring && !root.browsing
                                 enabled: root.configured
                                 checked: root.fullscreen
                                 onClicked: root.toggleFullscreen()
@@ -792,7 +821,7 @@ Panel {
                                 id: pinSwitch
                                 objectName: "pinSwitch"
                                 glyph: root.pinned ? ui.iconPin : ui.iconPinOutline
-                                visible: !root.showingMotion
+                                visible: !root.browsing
                                 checked: root.pinned
                                 tipText: root.pinned ? strings.t("toolbar.unpin") : strings.t("toolbar.pin")
                                 onClicked: root.pinned = !root.pinned
@@ -803,7 +832,7 @@ Panel {
                 StackLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    currentIndex: root.configuring ? 1 : root.showingMotion ? 2 : 0
+                    currentIndex: root.configuring ? 1 : root.showingMotion ? 2 : root.showingRecordings ? 3 : 0
                     ColumnLayout {
                         id: viewerPage
                         spacing: 10
@@ -1144,6 +1173,18 @@ Panel {
                         focus: root.showingMotion
                         onClosed: root.closeMotionGallery()
                     }
+                    RecordingsView {
+                        id: recordingsView
+                        objectName: "recordingsView"
+                        visible: root.showingRecordings && !root.configuring
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        focus: root.showingRecordings
+                        active: root.showingRecordings && !root.configuring && root.opened
+                        cameraId: root.selectedCameraId
+                        cameraName: root.selectedCameraIndex >= 0 ? root.cameras[root.selectedCameraIndex].name : ""
+                        onClosed: root.closeRecordings()
+                    }
                 }
             }
             component SectionLabel: MacText {
@@ -1229,7 +1270,7 @@ Panel {
                     var point = mapToItem(null, mouse.x, mouse.y)
                     var width = startWidth + (leftCorner ? -1 : 1) * (point.x - dragStart.x)
                     var height = startHeight + (point.y - dragStart.y)
-                    if (!root.configuring && !root.showingMotion) {
+                    if (!root.configuring && !root.browsing) {
                         // The live view scales proportionally, like a PiP window.
                         var scale = Math.max(width / startWidth, height / startHeight)
                         width = startWidth * scale

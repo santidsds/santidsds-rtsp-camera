@@ -97,5 +97,31 @@
   "clip.error.busy": "Another clip from this camera is still downloading.",
   "clip.error.empty": "The recording could not be read.",
   "clip.error.unsupported": "This camera can't play clips from its SD card.",
-  "clip.error.failed": "Could not get the clip."
+  "clip.error.failed": "Could not get the clip.",
+  "view.recordings": "Recordings",
+  "view.recordingsTip": "Browse the camera's SD card",
+  "recordings.title": "Recordings",
+  "recordings.days": {
+    "one": "%1 day on the card",
+    "other": "%1 days on the card"
+  },
+  "recordings.loading": "Reading the SD card…",
+  "recordings.hint": "Tap the timeline or a motion event to play.",
+  "recordings.empty": "No recordings on this day.",
+  "recordings.connecting": "Loading from the SD card…",
+  "recordings.ended": "End of this day's recordings.",
+  "recordings.prevMotion": "Previous motion (↑)",
+  "recordings.nextMotion": "Next motion (↓)",
+  "recordings.back10": "Back 10 s (←)",
+  "recordings.forward10": "Forward 10 s (→)",
+  "recordings.prevHour": "Previous hour",
+  "recordings.nextHour": "Next hour",
+  "recordings.motionCount": {
+    "one": "%1 motion",
+    "other": "%1 motions"
+  },
+  "recordings.noMotion": "No motion",
+  "recordings.error.noRecording": "Nothing recorded from that moment on this day.",
+  "recordings.error.unsupported": "This camera can't browse its SD card here.",
+  "recordings.error.failed": "Couldn't read the SD card."
 }
