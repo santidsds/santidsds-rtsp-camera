@@ -835,7 +835,7 @@ class _PipeWriter(threading.Thread):
 
 
 def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime, conn: socket.socket,
-                    ffmpeg: str = "ffmpeg"):
+                    ffmpeg: str = "ffmpeg", say=None):
     """Camera download → XM frames → ffmpeg (video copied, audio to AAC) → MPEG-TS → player.
 
     Nothing touches the disk. Backpressure runs the whole way: a paused player
@@ -883,6 +883,8 @@ def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime
         nonlocal process, sender
         video_read, video_write = os.pipe()
         timing["ts"], timing["fps"] = TsVideoWriter(media.codec), float(media.fps or 12)
+        if say and media.first_time:  # the stream starts at a key frame, a little before `begin`
+            say({"first": media.first_time.strftime(TIME_FORMAT)})
         command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
                    "-thread_queue_size", "1024", "-analyzeduration", "1000000", "-probesize", "1000000",
                    "-f", "mpegts", "-i", f"pipe:{video_read}"]
@@ -1009,7 +1011,7 @@ def stream_playback(config_dir: Path, camera_id: str, at: datetime, say, client_
             conn = _accept_player(server, token)
             reader.deadline = None
             client.sock.settimeout(PACKET_TIMEOUT_SEC)
-            _pump_to_player(client, reader, begin, end, conn, ffmpeg)
+            _pump_to_player(client, reader, begin, end, conn, ffmpeg, say)
         return {"ended": True, "start": begin.strftime(TIME_FORMAT), "end": end.strftime(TIME_FORMAT)}
     finally:
         server.close()

@@ -20,6 +20,7 @@ import motiond
 import sdclip
 
 AT = datetime(2026, 11, 15, 16, 43, 15)
+AT_STAMP = (26 << 26) | (11 << 22) | (15 << 17) | (16 << 12) | (43 << 6) | 15
 
 
 def xm(marker, payload, kind=3, fps=12, stamp=0):
@@ -227,7 +228,7 @@ def make_hevc_stream(seconds=2, fps=12):
     for unit in units:
         unit = b"\x00\x00\x00\x01\x46\x01" + unit
         key = b"\x00\x00\x01\x40\x01" in unit  # carries a VPS: a key frame
-        stream += xm(sdclip.VIDEO_I if key else sdclip.VIDEO_P, unit, kind=3, fps=fps)
+        stream += xm(sdclip.VIDEO_I if key else sdclip.VIDEO_P, unit, kind=3, fps=fps, stamp=AT_STAMP)
         stream += xm(sdclip.AUDIO, b"\xd5" * (8000 // fps), kind=sdclip.G711A)
     return bytes(stream), len(units)
 
@@ -396,6 +397,7 @@ class FetchTests(unittest.TestCase):
         self.assertIn("audio", streams)
         thread.join(10)
         self.assertTrue(result["value"]["ended"])
+        self.assertEqual(said[1], {"first": AT.strftime(sdclip.TIME_FORMAT)}, "the first frame's clock time")
         self.assertEqual((self.camera.claims, self.camera.stops), (1, 1))
         self.assertFalse(any(p.suffix == ".mp4" for p in self.cache.rglob("*")), "nothing written to disk")
 
