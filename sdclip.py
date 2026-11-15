@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import queue
+import secrets
+import threading
 import json
 import os
 import re
@@ -31,8 +34,9 @@ import struct
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, time as daytime, timedelta
 from pathlib import Path
 
 import motiond
@@ -50,6 +54,10 @@ RECEIVE_BUFFER = 64 * 1024
 MAX_DATA_PACKET = 256 * 1024     # cameras send 32 KB playback packets; more means a bad length
 LOGIN_COOLDOWN_SEC = 600         # after a refused login, don't try again for a while (lockout)
 LOGIN_REFUSED = ".login-refused"
+PLAY_SPAN_SEC = 30 * 60          # one playback session; the viewer starts another after it
+PLAY_ACCEPT_SEC = 20             # the player must connect within this
+PLAY_SEND_TIMEOUT_SEC = 120      # a player paused longer than this ends the session
+MAX_DAYS = 60
 CACHE_MAX_AGE_SEC = 24 * 3600
 CACHE_MAX_BYTES = 400 * 1024 * 1024
 PART_MAX_AGE_SEC = 3600
@@ -70,6 +78,14 @@ G711A = 0x0E
 AUDIO_RATE = 8000
 MAX_VIDEO_FRAME = 4 * 1024 * 1024
 MAX_AUDIO_FRAME = 8192
+
+
+DEBUG = os.environ.get("SDCLIP_DEBUG") == "1"
+
+
+def debug(*parts):
+    if DEBUG:
+        print("sdclip:", *parts, file=sys.stderr, flush=True)
 
 
 class ClipError(Exception):
@@ -107,27 +123,48 @@ def _next_marker(raw: bytes, start: int) -> int:
     return pos
 
 
-def parse_xm(raw: bytes) -> XmMedia:
-    """Split an XM recording into an Annex-B video stream and G.711 A-law audio.
+@dataclass
+class XmFrame:
+    marker: int
+    kind: int
+    payload: bytes
+    fps: int = 0
+    width: int = 0
+    height: int = 0
+    stamp: int = 0
 
-    Everything before the first key frame is dropped (P-frames without their
-    parameter sets cannot be decoded); garbage is skipped by searching for the
-    next frame marker; a truncated last frame ends the stream.
+
+def split_frames(raw: bytes, final: bool = True) -> tuple[list[XmFrame], int]:
+    """Cut XM media framing into frames. Returns (frames, bytes consumed).
+
+    With final=False (a stream still arriving) it stops before a frame it can't
+    judge yet, so the caller keeps the rest and calls again with more data.
+    Garbage is skipped by searching for the next frame marker. Frames are back
+    to back, and video can't contain a frame marker (H.264/H.265 never start a
+    unit with those bytes), so a marker inside a frame's claimed span, or none
+    where the next frame should start, means its length is wrong.
     """
-    media = XmMedia()
-    pos, size, started, skipping = 0, len(raw), False, False
+    frames, pos, size = [], 0, len(raw)
+
+    def skip_from(at):
+        nxt = _next_marker(raw, at)
+        if nxt >= 0:
+            return nxt, False
+        return (size if final else max(at, size - 3)), True  # keep a possibly split marker
+
     while pos + 8 <= size:
         if raw[pos:pos + 3] != b"\x00\x00\x01" or raw[pos + 3] not in MARKERS:
-            pos = _next_marker(raw, pos + 1)
-            if pos < 0:
+            pos, done = skip_from(pos + 1)
+            if done:
                 break
             continue
-        marker = raw[pos + 3]
+        marker, info = raw[pos + 3], {}
         kind = 0
         if marker in (VIDEO_I, PICTURE):
             if pos + 16 > size:
                 break
             kind, fps, width, height, stamp, length = struct.unpack_from("<BBBBII", raw, pos + 4)
+            info = {"fps": fps, "width": width * 8, "height": height * 8, "stamp": stamp}
             header, limit = 16, MAX_VIDEO_FRAME
         elif marker == VIDEO_P:
             (length,) = struct.unpack_from("<I", raw, pos + 4)
@@ -136,39 +173,86 @@ def parse_xm(raw: bytes) -> XmMedia:
             kind, _rate, length = struct.unpack_from("<BBH", raw, pos + 4)
             header, limit = 8, MAX_AUDIO_FRAME
         if length > limit or (marker == VIDEO_I and kind not in CODECS):
-            pos = _next_marker(raw, pos + 1)  # a false marker inside other data
-            if pos < 0:
+            pos, done = skip_from(pos + 1)  # a false marker inside other data
+            if done:
                 break
             continue
         end = pos + header + length
-        # Frames are back to back, and video can't contain a frame marker (H.264/H.265
-        # never start a unit with those bytes). A marker inside the claimed span, or
-        # none where the next frame should start, means the length is wrong.
-        inner = _next_marker(raw, pos + header)
-        follows = end + 4 <= size and raw[end:end + 3] == b"\x00\x00\x01" and raw[end + 3] in MARKERS
-        if (end > size or (inner != -1 and inner < end)
-                or (not follows and end + 4 <= size and _next_marker(raw, end) != -1)):
-            nxt = _next_marker(raw, pos + 1)
-            if nxt < 0:
-                break  # truncated tail
-            pos = nxt
+        if end > size:
+            if not final:
+                break  # wait for the rest of the frame
+            pos, done = skip_from(pos + 1)  # truncated tail, or a wrong length
+            if done:
+                break
             continue
-        payload = raw[pos + header:end]
-        if marker == VIDEO_I:
-            if not media.codec:
-                media.codec, media.fps = CODECS[kind], fps
-                media.width, media.height = width * 8, height * 8
-                media.first_time = xm_time(stamp)
-            skipping = CODECS[kind] != media.codec  # another stream's frames; skip until ours return
-            started = started or not skipping
-        if started and not (skipping and marker in (VIDEO_I, VIDEO_P)):
-            if marker in (VIDEO_I, VIDEO_P):
-                media.video += payload
-                media.frames += 1
-            elif marker == AUDIO and kind == G711A:
-                media.audio += payload
+        inner = _next_marker(raw, pos + header)
+        if inner != -1 and inner < end:
+            pos, done = skip_from(pos + 1)
+            if done:
+                break
+            continue
+        if end + 4 > size:
+            if not final:
+                break  # need to see where the next frame starts
+        elif not (raw[end:end + 3] == b"\x00\x00\x01" and raw[end + 3] in MARKERS):
+            if _next_marker(raw, end) != -1:
+                pos, done = skip_from(pos + 1)
+                if done:
+                    break
+                continue
+            if not final:
+                break
+        frames.append(XmFrame(marker, kind, raw[pos + header:end], **info))
         pos = end
-    return media
+    return frames, pos
+
+
+class XmAssembler:
+    """Picks the frames that make a clip: from the first key frame on, one codec."""
+
+    def __init__(self, collect: bool = True):
+        self.media = XmMedia()
+        self.collect = collect
+        self.started = False
+        self.skipping = False
+
+    def add(self, frame: XmFrame) -> str | None:
+        """Returns "video", "audio" or None (dropped)."""
+        if frame.marker == VIDEO_I:
+            codec = CODECS[frame.kind]
+            if not self.media.codec:
+                media = self.media
+                media.codec, media.fps, media.width, media.height = codec, frame.fps, frame.width, frame.height
+                media.first_time = xm_time(frame.stamp)
+            self.skipping = codec != self.media.codec  # another stream's frames; skip until ours return
+            self.started = self.started or not self.skipping
+        if not self.started:
+            return None
+        if frame.marker in (VIDEO_I, VIDEO_P):
+            if self.skipping:
+                return None
+            self.media.frames += 1
+            if self.collect:
+                self.media.video += frame.payload
+            return "video"
+        if frame.marker == AUDIO and frame.kind == G711A:
+            if self.collect:
+                self.media.audio += frame.payload
+            return "audio"
+        return None
+
+
+def parse_xm(raw: bytes) -> XmMedia:
+    """Split an XM recording into an Annex-B video stream and G.711 A-law audio.
+
+    Everything before the first key frame is dropped (P-frames without their
+    parameter sets cannot be decoded).
+    """
+    assembler = XmAssembler()
+    frames, _ = split_frames(raw, final=True)
+    for frame in frames:
+        assembler.add(frame)
+    return assembler.media
 
 
 def effective_fps(media: XmMedia) -> float:
@@ -447,10 +531,8 @@ def prune_cache(root: Path, now: float | None = None, max_age: float = CACHE_MAX
     return removed
 
 
-def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None, progress=None,
-               ffmpeg: str = "ffmpeg", root: Path | None = None) -> dict:
-    client_class = client_class or motiond.DvripClient
-    root = root or cache_root()
+def camera_target(config_dir: Path, camera_id: str, root: Path) -> tuple[dict, Path]:
+    """The camera's DVRIP login and its private cache folder."""
     library = motiond.load_json(config_dir / "config.json", {})
     camera = motiond.find_camera(library if isinstance(library, dict) else {}, camera_id)
     if not camera:
@@ -460,6 +542,44 @@ def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None
         raise ClipError("unsupported")
     folder = root / camera_id
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return login, folder
+
+
+@contextmanager
+def camera_session(login: dict, folder: Path, client_class=None, deadline: float | None = None):
+    """One DVRIP login, never retried; after a refusal none for LOGIN_COOLDOWN_SEC."""
+    client_class = client_class or motiond.DvripClient
+    refused = folder / LOGIN_REFUSED
+    try:
+        if time.time() - refused.stat().st_mtime < LOGIN_COOLDOWN_SEC:
+            raise ClipError("login")  # don't add to the camera's failed-login count
+    except FileNotFoundError:
+        pass
+    client = client_class(login["host"], login["port"], login["user"], login["password"], timeout=10)
+    client.receive_buffer = RECEIVE_BUFFER
+    try:
+        try:
+            client.connect()
+        except motiond.DvripLoginError:
+            refused.touch()
+            raise ClipError("login") from None
+        except OSError:
+            raise ClipError("unreachable") from None
+        refused.unlink(missing_ok=True)
+        reader = PacketReader(client.sock, client.session)
+        reader.deadline = deadline
+        try:
+            yield client, reader
+        except (OSError, ConnectionError):
+            raise ClipError("unreachable") from None
+    finally:
+        client.close()
+
+
+def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None, progress=None,
+               ffmpeg: str = "ffmpeg", root: Path | None = None) -> dict:
+    root = root or cache_root()
+    login, folder = camera_target(config_dir, camera_id, root)
     stem = at.strftime(FILE_TIME_FORMAT)
     out = folder / (stem + ".mp4")                   # complete clips are reused
     unfinished = folder / (stem + ".partial.mp4")    # short or still-recording clips are refetched
@@ -476,7 +596,6 @@ def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None
             result["duration"] = round(duration, 1)
         return result
 
-    refused = folder / LOGIN_REFUSED
     with open(folder / ".lock", "a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -486,34 +605,13 @@ def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None
         if playable(out):
             return done(True)
         out.unlink(missing_ok=True)
-        try:
-            if time.time() - refused.stat().st_mtime < LOGIN_COOLDOWN_SEC:
-                raise ClipError("login")  # don't add to the camera's failed-login count
-        except FileNotFoundError:
-            pass
         deadline = time.monotonic() + DEADLINE_SEC
-        client = client_class(login["host"], login["port"], login["user"], login["password"], timeout=10)
-        client.receive_buffer = RECEIVE_BUFFER
-        try:
-            try:
-                client.connect()  # one attempt: failures count toward the camera's lockout
-            except motiond.DvripLoginError:
-                refused.touch()
-                raise ClipError("login") from None
-            except OSError:
-                raise ClipError("unreachable") from None
-            refused.unlink(missing_ok=True)
-            reader = PacketReader(client.sock, client.session)
-            reader.deadline = deadline
+        with camera_session(login, folder, client_class, deadline) as (client, reader):
             files = query_files(client, reader, at - timedelta(minutes=3), at + timedelta(minutes=3))
             window = plan_window(files, at)
             if not window:
                 raise ClipError("no-recording")
             raw, complete = download(client, reader, window[0], window[1], deadline, progress=progress)
-        except (OSError, ConnectionError):
-            raise ClipError("unreachable") from None
-        finally:
-            client.close()
         finished = complete and window[1] < datetime.now() - timedelta(seconds=5)
         target = out if finished else unfinished
         duration = write_mp4(parse_xm(raw), target, ffmpeg)
@@ -532,6 +630,389 @@ def playable(path: Path) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return True  # can't check; trust the file
     return result.returncode == 0 and result.stdout.strip() != ""
+
+
+# --- browsing the card: days, a day's recordings, streamed playback ----------------
+
+def storage_span(client, reader: PacketReader) -> tuple[datetime | None, datetime | None]:
+    """Oldest and newest recording on the card(s)."""
+    client.send(1020, {"Name": "StorageInfo", "SessionID": client.session_id})
+    disks = reader.reply(1021).get("StorageInfo")
+    oldest, newest = [], []
+    for disk in disks if isinstance(disks, list) else []:
+        for part in (disk.get("Partition") or []) if isinstance(disk, dict) else []:
+            first, last = parse_time(part.get("OldStartTime")), parse_time(part.get("NewEndTime"))
+            if first and last and first.year > 2000 and last >= first:
+                oldest.append(first)
+                newest.append(last)
+    return (min(oldest), max(newest)) if oldest else (None, None)
+
+
+def day_index(files: list, day: date) -> dict:
+    """A day's recorded time merged into ranges, plus its motion recordings."""
+    day_start = datetime.combine(day, daytime.min)
+    day_end = day_start + timedelta(days=1) - timedelta(seconds=1)
+    spans, motion = [], []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        begin, end = parse_time(entry.get("BeginTime")), parse_time(entry.get("EndTime"))
+        if not begin or not end or end < begin or end < day_start or begin > day_end:
+            continue
+        begin, end = max(begin, day_start), min(end, day_end)
+        spans.append((begin, end))
+        if "[M]" in str(entry.get("FileName", "")):
+            motion.append((begin, end))
+    merged = []
+    for begin, end in sorted(spans):
+        if merged and begin <= merged[-1][1] + timedelta(seconds=2):
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([begin, end])
+    clock = "%H:%M:%S"
+    return {"ranges": [[b.strftime(clock), e.strftime(clock)] for b, e in merged],
+            "motion": [[b.strftime(clock), e.strftime(clock)] for b, e in sorted(set(motion))]}
+
+
+def recording_index(config_dir: Path, camera_id: str, day: date | None = None, client_class=None,
+                    root: Path | None = None) -> dict:
+    login, folder = camera_target(config_dir, camera_id, root or cache_root())
+    with camera_session(login, folder, client_class, time.monotonic() + 45) as (client, reader):
+        oldest, newest = storage_span(client, reader)
+        last = newest.date() if newest else date.today()
+        first = max(oldest.date() if oldest else last - timedelta(days=6), last - timedelta(days=MAX_DAYS - 1))
+        day = day or last
+        files = query_files(client, reader, datetime.combine(day, daytime.min),
+                            datetime.combine(day, daytime(23, 59, 59)), pages=40)
+    days = [(last - timedelta(days=n)).isoformat() for n in range((last - first).days + 1)]
+    return {"ok": True, "days": days, "date": day.isoformat(), **day_index(files, day)}
+
+
+def plan_playback(files: list, at: datetime) -> datetime | None:
+    """Where playback starts: at that moment if it was recorded, else the next recording."""
+    later = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        begin, end = parse_time(entry.get("BeginTime")), parse_time(entry.get("EndTime"))
+        if not begin or not end:
+            continue
+        if begin - timedelta(seconds=2) <= at <= end:
+            return max(at, begin)
+        if begin > at:
+            later.append(begin)
+    return min(later) if later else None
+
+
+def _crc32_mpeg(data: bytes) -> int:
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc ^= byte << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF if crc & 0x80000000 else (crc << 1) & 0xFFFFFFFF
+    return crc
+
+
+class TsVideoWriter:
+    """Wraps camera video frames in MPEG-TS with a timestamp on each frame.
+
+    ffmpeg can't time raw H.264/H.265 from a pipe: its packets carry no
+    timestamps, so its scheduler keeps reading video and starves the audio
+    input. A few hand-made TS packets fix that: PAT, PMT, one PES per frame.
+    """
+
+    PMT_PID, VIDEO_PID = 0x1000, 0x0100
+    STREAM_TYPES = {"hevc": 0x24, "h264": 0x1B}
+
+    def __init__(self, codec: str):
+        self.stream_type = self.STREAM_TYPES[codec]
+        self.counters = {}
+        self.frames = 0
+
+    def _packets(self, pid: int, payload: bytes, start: bool, pcr_base: int | None = None) -> bytes:
+        """Split a payload into 188-byte TS packets (stuffing the last one)."""
+        out, first = bytearray(), True
+        while payload or first:
+            field = None  # adaptation field contents, after its length byte
+            if first and pcr_base is not None:
+                base = pcr_base & ((1 << 33) - 1)
+                field = b"\x10" + struct.pack(">IH", base >> 1, ((base & 1) << 15) | 0x7E00)
+            room = 184 - (1 + len(field) if field is not None else 0)
+            chunk, payload = payload[:room], payload[room:]
+            short = room - len(chunk)
+            if short:
+                if field is not None:
+                    field += b"\xff" * short
+                elif short == 1:
+                    field = b""  # just the length byte
+                else:
+                    field = b"\x00" + b"\xff" * (short - 2)
+            counter = self.counters.get(pid, 0)
+            self.counters[pid] = (counter + 1) & 0x0F
+            header = bytes([0x47, (0x40 if first and start else 0) | (pid >> 8), pid & 0xFF,
+                            (0x30 if field is not None else 0x10) | counter])
+            packet = header + (bytes([len(field)]) + field if field is not None else b"") + chunk
+            assert len(packet) == 188
+            out += packet
+            first = False
+        return bytes(out)
+
+    def _section(self, table_id: int, body: bytes) -> bytes:
+        section = bytes([table_id]) + struct.pack(">H", 0xB000 | (len(body) + 4)) + body
+        return b"\x00" + section + struct.pack(">I", _crc32_mpeg(section))
+
+    def tables(self) -> bytes:
+        pat = self._section(0x00, struct.pack(">HBBBHH", 1, 0xC1, 0, 0, 1, 0xE000 | self.PMT_PID))
+        pmt = self._section(0x02, struct.pack(">HBBBHHBHH", 1, 0xC1, 0, 0, 0xE000 | self.VIDEO_PID, 0xF000,
+                                              self.stream_type, 0xE000 | self.VIDEO_PID, 0xF000))
+        return self._packets(0, pat, True) + self._packets(self.PMT_PID, pmt, True)
+
+    def frame(self, data: bytes, seconds: float) -> bytes:
+        ticks = int(round(seconds * 90000)) + 90000  # start at 1 s; 90 kHz clock
+        pts = bytes([0x21 | ((ticks >> 29) & 0x0E), (ticks >> 22) & 0xFF, 0x01 | ((ticks >> 14) & 0xFE),
+                     (ticks >> 7) & 0xFF, 0x01 | ((ticks << 1) & 0xFE)])
+        pes = b"\x00\x00\x01\xe0\x00\x00\x80\x80\x05" + pts + data
+        out = self.tables() if self.frames % 48 == 0 else b""
+        self.frames += 1
+        return out + self._packets(self.VIDEO_PID, pes, True, pcr_base=ticks - 9000)
+
+
+def _accept_player(server: socket.socket, token: str) -> socket.socket:
+    """Wait for the player's GET of our private URL; anything else gets a 404."""
+    deadline = time.monotonic() + PLAY_ACCEPT_SEC
+    while True:
+        server.settimeout(max(0.1, deadline - time.monotonic()))
+        try:
+            conn, _ = server.accept()
+        except TimeoutError:
+            raise ClipError("timeout") from None
+        conn.settimeout(5)
+        try:
+            request = conn.recv(4096).decode("latin-1", "replace").split("\r\n", 1)[0].split()
+        except OSError:
+            conn.close()
+            continue
+        if len(request) >= 2 and request[0] == "GET" and request[1] == f"/{token}.ts":
+            conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Type: video/mp2t\r\nCache-Control: no-store\r\n"
+                         b"Connection: close\r\n\r\n")
+            conn.settimeout(PLAY_SEND_TIMEOUT_SEC)  # the player's pace is ours: it backs up to the camera
+            return conn
+        try:
+            conn.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        except OSError:
+            pass
+        conn.close()
+
+
+class _PipeWriter(threading.Thread):
+    """Feeds one ffmpeg input. Its queue never blocks the producer (blocking on
+    video while ffmpeg waits for audio would deadlock); `backlog` tells the
+    producer when to stop reading the camera instead."""
+
+    def __init__(self, fd: int, stop: threading.Event):
+        super().__init__(daemon=True)
+        self.fd, self.stop = fd, stop
+        self.queue = queue.Queue()
+        self.backlog = 0  # bytes queued, not yet written
+
+    def run(self):
+        try:
+            while True:
+                chunk = self.queue.get()
+                if chunk is None:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(self.fd, view):]
+                self.backlog -= len(chunk)
+        except OSError:
+            self.stop.set()
+        finally:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+
+
+def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime, conn: socket.socket,
+                    ffmpeg: str = "ffmpeg"):
+    """Camera download → XM frames → ffmpeg (video copied, audio to AAC) → MPEG-TS → player.
+
+    Nothing touches the disk. Backpressure runs the whole way: a paused player
+    stops ffmpeg, which stops the queues, which stops reading the camera.
+    """
+    params = {"PlayMode": "ByTime", "FileName": "", "StreamType": 0, "Value": 0, "TransMode": "TCP", "Channel": 0}
+
+    def body(action):
+        return {"Name": "OPPlayBack", "SessionID": client.session_id, "OPPlayBack": {
+            "Action": action, "Parameter": params,
+            "StartTime": begin.strftime(TIME_FORMAT), "EndTime": end.strftime(TIME_FORMAT)}}
+
+    stop = threading.Event()
+    process, writers, sender, claimed = None, {}, None, False
+    sent = [0]
+    timing = {"ts": None, "fps": 12.0, "index": 0}
+    alive_every = max(2.0, getattr(client, "alive_interval", 20) / 2)
+    last_alive = time.monotonic()
+
+    def keep_alive():
+        nonlocal last_alive
+        if time.monotonic() - last_alive > alive_every:
+            client.keepalive()
+            last_alive = time.monotonic()
+
+    def put(kind, data):
+        if kind == "video":  # timestamped by frame number, so ffmpeg reads both inputs in step
+            data = timing["ts"].frame(data, timing["index"] / timing["fps"])
+            timing["index"] += 1
+        writers[kind].backlog += len(data)
+        writers[kind].queue.put(data)
+
+    def wait_for_player():
+        # A paused or slow player: stop reading the camera until ffmpeg catches up.
+        waited = time.monotonic()
+        while not stop.is_set() and any(w.backlog > limit for w, limit in (
+                (writers.get("video"), 4 * 1024 * 1024), (writers.get("audio"), 256 * 1024)) if w):
+            time.sleep(0.2)
+            keep_alive()
+            if DEBUG and time.monotonic() - waited > 3:
+                debug("waiting for the player:", {k: w.backlog // 1024 for k, w in writers.items()})
+                waited = time.monotonic()
+
+    def start_ffmpeg(media: XmMedia, with_audio: bool):
+        nonlocal process, sender
+        video_read, video_write = os.pipe()
+        timing["ts"], timing["fps"] = TsVideoWriter(media.codec), float(media.fps or 12)
+        command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+                   "-thread_queue_size", "1024", "-analyzeduration", "1000000", "-probesize", "1000000",
+                   "-f", "mpegts", "-i", f"pipe:{video_read}"]
+        fds = [video_read]
+        if with_audio:
+            audio_read, audio_write = os.pipe()
+            command += ["-thread_queue_size", "1024", "-f", "alaw", "-ar", str(AUDIO_RATE), "-ac", "1",
+                        "-i", f"pipe:{audio_read}"]
+            fds.append(audio_read)
+        command += ["-map", "0:v:0"] + (["-map", "1:a:0"] if with_audio else []) + ["-c:v", "copy"]
+        command += (["-c:a", "aac", "-b:a", "48k"] if with_audio else []) + ["-f", "mpegts", "-flush_packets", "1", "pipe:1"]
+        debug("ffmpeg start", media.codec, media.fps, "audio" if with_audio else "no audio")
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=None if DEBUG else subprocess.DEVNULL,
+                                   pass_fds=fds)
+        for fd in fds:
+            os.close(fd)
+        writers["video"] = _PipeWriter(video_write, stop)
+        if with_audio:
+            writers["audio"] = _PipeWriter(audio_write, stop)
+        for writer in writers.values():
+            writer.start()
+
+        def send():
+            try:
+                while True:
+                    chunk = process.stdout.read1(65536)
+                    if not chunk:
+                        break
+                    conn.sendall(chunk)
+                    sent[0] += len(chunk)
+            except OSError as error:
+                debug("send stopped", type(error).__name__)
+            finally:
+                stop.set()  # player gone or stream finished
+        sender = threading.Thread(target=send, daemon=True)
+        sender.start()
+
+    try:
+        claimed = True
+        client.send(PLAYBACK_CLAIM, body("Claim"))
+        if reader.reply(PLAYBACK_CLAIM + 1).get("Ret") not in OK_CODES:
+            raise ClipError("no-recording")
+        client.send(PLAYBACK, body("DownloadStart"))
+        assembler, pending, held = XmAssembler(collect=False), bytearray(), []
+        began, received = time.monotonic(), 0
+        while not stop.is_set():
+            keep_alive()
+            msg, payload = reader.packet()
+            if msg == PLAYBACK + 1 and payload[:1] == b"{":
+                if motiond.dvrip_json(payload).get("Ret") not in OK_CODES:
+                    raise ClipError("no-recording")
+                continue
+            if msg != PLAYBACK_DATA:
+                debug("other message", msg, len(payload))
+                continue
+            final = not payload
+            pending += payload
+            received += len(payload)
+            if DEBUG and received // 262144 != (received - len(payload)) // 262144:
+                debug(f"received {received // 1024} KB, frames {assembler.media.frames}, sent {sent[0] // 1024} KB,"
+                      f" t={time.monotonic() - began:.1f}s, queued "
+                      + ", ".join(f"{k} {w.backlog // 1024} KB" for k, w in writers.items())
+                      + f", pending {len(pending)}, held {len(held)}")
+            frames, used = split_frames(bytes(pending), final=final)
+            del pending[:used]
+            for frame in frames:
+                kind = assembler.add(frame)
+                if kind:
+                    held.append((kind, frame.payload))
+            if process is None and assembler.media.codec and (
+                    final or assembler.media.frames >= 24 or any(k == "audio" for k, _ in held)):
+                start_ffmpeg(assembler.media, any(k == "audio" for k, _ in held))
+            if process is not None:
+                for kind, data in held:
+                    if kind in writers:
+                        put(kind, data)
+                held.clear()
+                wait_for_player()
+            if final:
+                break
+            ahead = received / RATE_LIMIT_BYTES - (time.monotonic() - began)
+            if ahead > 0:
+                time.sleep(ahead)
+    except (OSError, ConnectionError):
+        pass  # the camera stopped sending: end of stream
+    finally:
+        if claimed:
+            try:
+                client.sock.settimeout(5)
+                client.send(PLAYBACK, body("DownloadStop"))
+            except OSError:
+                pass
+        for writer in writers.values():
+            writer.queue.put(None)  # EOF lets ffmpeg flush the tail
+        if sender is not None:
+            sender.join(timeout=0 if stop.is_set() else 15)
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def stream_playback(config_dir: Path, camera_id: str, at: datetime, say, client_class=None,
+                    root: Path | None = None, ffmpeg: str = "ffmpeg") -> dict:
+    """Play the card from `at` (or the next recording) through a private local URL."""
+    login, folder = camera_target(config_dir, camera_id, root or cache_root())
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        server.bind(("127.0.0.1", 0))
+        server.listen(2)
+        token = secrets.token_urlsafe(18)
+        with camera_session(login, folder, client_class, time.monotonic() + 30) as (client, reader):
+            files = query_files(client, reader, at - timedelta(minutes=3), at + timedelta(hours=6), pages=4)
+            begin = plan_playback(files, at)
+            if not begin:
+                raise ClipError("no-recording")
+            end = min(begin + timedelta(seconds=PLAY_SPAN_SEC), datetime.combine(begin.date(), daytime(23, 59, 59)))
+            say({"url": f"http://127.0.0.1:{server.getsockname()[1]}/{token}.ts",
+                 "start": begin.strftime(TIME_FORMAT), "end": end.strftime(TIME_FORMAT)})
+            conn = _accept_player(server, token)
+            reader.deadline = None
+            client.sock.settimeout(PACKET_TIMEOUT_SEC)
+            _pump_to_player(client, reader, begin, end, conn, ffmpeg)
+        return {"ended": True, "start": begin.strftime(TIME_FORMAT), "end": end.strftime(TIME_FORMAT)}
+    finally:
+        server.close()
 
 
 def safe_name(name: str) -> str:
@@ -590,6 +1071,9 @@ def main(argv=None) -> int:
     parser.add_argument("--camera", required=True)
     parser.add_argument("--at")
     parser.add_argument("--save")
+    parser.add_argument("--index", action="store_true", help="days on the card and one day's recordings")
+    parser.add_argument("--date", help="YYYY-MM-DD for --index (default: newest day)")
+    parser.add_argument("--play", action="store_true", help="stream the card from --at to a local URL")
     args = parser.parse_args(argv)
     config_dir = motiond.base_dirs()[0]
     try:
@@ -600,11 +1084,26 @@ def main(argv=None) -> int:
             camera = motiond.find_camera(library if isinstance(library, dict) else {}, args.camera) or {}
             emit({"ok": True, "path": str(save_clip(Path(args.save), camera.get("name") or "Camera"))})
             return 0
+        if args.index:
+            day = None
+            if args.date:
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
+                    raise ClipError("bad-request")
+                try:
+                    day = date.fromisoformat(args.date)
+                except ValueError:
+                    raise ClipError("bad-request") from None
+            emit(recording_index(config_dir, args.camera, day))
+            return 0
         if not args.at or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", args.at):
             raise ClipError("bad-request")
         at = parse_time(args.at)
         if not at:
             raise ClipError("bad-request")
+        if args.play:
+            emit(stream_playback(config_dir, args.camera, at, emit))
+            return 0
+
         def progress(size):
             try:
                 print(json.dumps({"progress": size}), flush=True)
