@@ -131,6 +131,13 @@ class StreamingPartsTests(unittest.TestCase):
             "ranges": [["00:00:00", "00:08:30"], ["09:00:00", "09:05:00"]],
             "motion": [["00:08:01", "00:08:30"]]})
 
+    def test_playback_stops_at_a_gap_in_the_recording(self):
+        files = [entry(AT - timedelta(minutes=5), AT + timedelta(minutes=1)),
+                 entry(AT + timedelta(minutes=1, seconds=1), AT + timedelta(minutes=6), "M"),
+                 entry(AT + timedelta(minutes=20), AT + timedelta(minutes=25))]
+        self.assertEqual(sdclip.recorded_until(files, AT), AT + timedelta(minutes=6))
+        self.assertEqual(sdclip.recorded_until(files, AT + timedelta(minutes=21)), AT + timedelta(minutes=25))
+
     def test_playback_starts_at_the_moment_or_the_next_recording(self):
         files = [entry(AT - timedelta(minutes=5), AT - timedelta(minutes=1)),
                  entry(AT + timedelta(minutes=10), AT + timedelta(minutes=15))]
@@ -236,8 +243,9 @@ def make_hevc_stream(seconds=2, fps=12):
 class FakeCamera:
     """Speaks just enough DVRIP: login, file query, playback claim/download/stop."""
 
-    def __init__(self, stream=b"", files=None, refuse=False, stall_after=None):
+    def __init__(self, stream=b"", files=None, refuse=False, stall_after=None, refuse_code=205):
         self.stream, self.files, self.refuse, self.stall_after = stream, files or [], refuse, stall_after
+        self.refuse_code = refuse_code
         self.logins, self.claims, self.stops = 0, 0, 0
         self.server = socket.socket()
         self.server.bind(("127.0.0.1", 0))
@@ -272,7 +280,7 @@ class FakeCamera:
             request = motiond.dvrip_json(data)
             if msg == motiond.DVRIP_LOGIN:
                 self.logins += 1
-                ret = 205 if self.refuse else 100
+                ret = self.refuse_code if self.refuse else 100
                 conn.sendall(packet(1001, self.body({"Ret": ret, "SessionID": "0x00000007"}), version=0))
                 if self.refuse:
                     return
@@ -425,6 +433,13 @@ class FetchTests(unittest.TestCase):
             self.fetch()
         self.assertEqual(caught.exception.code, "no-recording")
         self.assertEqual(self.camera.claims, 0)
+
+    def test_a_busy_account_is_not_a_password_refusal(self):
+        self.start(stream=self.stream, files=self.recording(), refuse=True, refuse_code=207)
+        with self.assertRaises(sdclip.ClipError) as caught:
+            self.fetch()
+        self.assertEqual(caught.exception.code, "login")
+        self.assertFalse((self.cache / "c2" / sdclip.LOGIN_REFUSED).exists(), "no cooldown for 'logged in elsewhere'")
 
     def test_camera_without_dvrip_is_unsupported(self):
         self.start()

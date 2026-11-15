@@ -51,6 +51,8 @@ PACKET_TIMEOUT_SEC = 10   # one silent gap from the camera
 # ~3x the recording bitrate, so a 25 s clip takes about 8 s.
 RATE_LIMIT_BYTES = 320 * 1024   # per second
 PLAY_RATE_LIMIT_BYTES = 640 * 1024  # playback follows the player; this caps 4x fast-forward
+PLAY_STALL_SEC = 60              # nothing reaching the player this long: give up the session
+REFUSING_LOGIN_CODES = (106, 203, 205, 206)  # wrong password / locked: worth a cooldown
 RECEIVE_BUFFER = 64 * 1024
 MAX_DATA_PACKET = 256 * 1024     # cameras send 32 KB playback packets; more means a bad length
 LOGIN_COOLDOWN_SEC = 600         # after a refused login, don't try again for a while (lockout)
@@ -561,8 +563,9 @@ def camera_session(login: dict, folder: Path, client_class=None, deadline: float
     try:
         try:
             client.connect()
-        except motiond.DvripLoginError:
-            refused.touch()
+        except motiond.DvripLoginError as error:
+            if error.code in REFUSING_LOGIN_CODES:
+                refused.touch()
             raise ClipError("login") from None
         except OSError:
             raise ClipError("unreachable") from None
@@ -687,6 +690,19 @@ def recording_index(config_dir: Path, camera_id: str, day: date | None = None, c
                             datetime.combine(day, daytime(23, 59, 59)), pages=40)
     days = [(last - timedelta(days=n)).isoformat() for n in range((last - first).days + 1)]
     return {"ok": True, "days": days, "date": day.isoformat(), **day_index(files, day)}
+
+
+def recorded_until(files: list, begin: datetime) -> datetime:
+    """End of the uninterrupted recording that contains `begin` (gaps under 2 s ignored)."""
+    spans = sorted((b, e) for b, e in ((parse_time(f.get("BeginTime")), parse_time(f.get("EndTime")))
+                                       for f in files if isinstance(f, dict)) if b and e and e >= b)
+    until = begin
+    for b, e in spans:
+        if b <= until + timedelta(seconds=2):
+            until = max(until, e)
+        elif b > until:
+            break
+    return until
 
 
 def plan_playback(files: list, at: datetime) -> datetime | None:
@@ -815,6 +831,12 @@ class _PipeWriter(threading.Thread):
         self.fd, self.stop = fd, stop
         self.queue = queue.Queue()
         self.backlog = 0  # bytes queued, not yet written
+        self.lock = threading.Lock()
+
+    def add(self, chunk):
+        with self.lock:
+            self.backlog += len(chunk)
+        self.queue.put(chunk)
 
     def run(self):
         try:
@@ -825,7 +847,8 @@ class _PipeWriter(threading.Thread):
                 view = memoryview(chunk)
                 while view:
                     view = view[os.write(self.fd, view):]
-                self.backlog -= len(chunk)
+                with self.lock:
+                    self.backlog -= len(chunk)
         except OSError:
             self.stop.set()
         finally:
@@ -852,7 +875,7 @@ def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime
     stop = threading.Event()
     process, writers, sender, claimed = None, {}, None, False
     sent = [0]
-    timing = {"ts": None, "fps": 12.0, "index": 0}
+    timing = {"ts": None, "fps": 12.0, "index": 0, "pts": 0.0, "scale": 1.0, "audio": 0}
     alive_every = max(2.0, getattr(client, "alive_interval", 20) / 2)
     last_alive = time.monotonic()
 
@@ -863,19 +886,32 @@ def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime
             last_alive = time.monotonic()
 
     def put(kind, data):
-        if kind == "video":  # timestamped by frame number, so ffmpeg reads both inputs in step
-            data = timing["ts"].frame(data, timing["index"] / timing["fps"])
+        if kind == "audio":
+            timing["audio"] += len(data)
+        else:
+            # Each frame gets a timestamp so ffmpeg reads both inputs in step. Frames are
+            # spaced at the header's rate, corrected to the audio clock (8 kHz, exact)
+            # every few seconds, so a camera that really runs slower can't drift away.
+            fps, index = timing["fps"], timing["index"]
+            if index and index % 60 == 0 and timing["audio"] >= AUDIO_RATE * 5:
+                timing["scale"] = min(2.0, max(0.5, (timing["audio"] / AUDIO_RATE) / (index / fps)))
+            data = timing["ts"].frame(data, timing["pts"])
+            timing["pts"] += timing["scale"] / fps
             timing["index"] += 1
-        writers[kind].backlog += len(data)
-        writers[kind].queue.put(data)
+        writers[kind].add(data)
 
     def wait_for_player():
         # A paused or slow player: stop reading the camera until ffmpeg catches up.
-        waited = time.monotonic()
+        waited, progress, since = time.monotonic(), sent[0], time.monotonic()
         while not stop.is_set() and any(w.backlog > limit for w, limit in (
-                (writers.get("video"), 4 * 1024 * 1024), (writers.get("audio"), 256 * 1024)) if w):
+                (writers.get("video"), 1536 * 1024), (writers.get("audio"), 96 * 1024)) if w):
             time.sleep(0.2)
             keep_alive()
+            if sent[0] != progress:
+                progress, since = sent[0], time.monotonic()
+            elif time.monotonic() - since > PLAY_STALL_SEC:
+                debug("player stalled; ending the session")
+                stop.set()  # ffmpeg or the player is stuck: don't hold the camera forever
             if DEBUG and time.monotonic() - waited > 3:
                 debug("waiting for the player:", {k: w.backlog // 1024 for k, w in writers.items()})
                 waited = time.monotonic()
@@ -971,6 +1007,9 @@ def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime
                 time.sleep(ahead)
     except (OSError, ConnectionError):
         pass  # the camera stopped sending: end of stream
+    except ClipError:
+        stop.set()  # cancelled: don't wait to flush, just stop
+        raise
     finally:
         if claimed:
             try:
@@ -980,8 +1019,14 @@ def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime
                 pass
         for writer in writers.values():
             writer.queue.put(None)  # EOF lets ffmpeg flush the tail
-        if sender is not None:
-            sender.join(timeout=0 if stop.is_set() else 15)
+        if sender is not None and not stop.is_set():
+            # Let the player take what's queued, as long as it keeps taking it.
+            flushed = sent[0]
+            for _ in range(120):
+                sender.join(timeout=5)
+                if not sender.is_alive() or sent[0] == flushed:
+                    break
+                flushed = sent[0]
         if process is not None:
             if process.poll() is None:
                 process.kill()
@@ -1002,11 +1047,14 @@ def stream_playback(config_dir: Path, camera_id: str, at: datetime, say, client_
         server.listen(2)
         token = secrets.token_urlsafe(18)
         with camera_session(login, folder, client_class, time.monotonic() + 30) as (client, reader):
-            files = query_files(client, reader, at - timedelta(minutes=3), at + timedelta(hours=6), pages=4)
+            day_end = datetime.combine(at.date(), daytime(23, 59, 59))
+            files = query_files(client, reader, at - timedelta(minutes=3), min(at + timedelta(hours=6), day_end), pages=4)
             begin = plan_playback(files, at)
-            if not begin:
+            if not begin or begin.date() != at.date():
                 raise ClipError("no-recording")
-            end = min(begin + timedelta(seconds=PLAY_SPAN_SEC), datetime.combine(begin.date(), daytime(23, 59, 59)))
+            # Stop at the end of this stretch of recording: across a gap the stream
+            # would jump in time while the player's clock doesn't.
+            end = min(begin + timedelta(seconds=PLAY_SPAN_SEC), day_end, recorded_until(files, begin))
             say({"url": f"http://127.0.0.1:{server.getsockname()[1]}/{token}.ts",
                  "start": begin.strftime(TIME_FORMAT), "end": end.strftime(TIME_FORMAT)})
             conn = _accept_player(server, token)
@@ -1062,7 +1110,10 @@ def emit(data: dict):
 
 
 def _cancel(signum, frame):  # noqa: ARG001
-    # Unwind normally so the camera is told to stop sending (see download()).
+    # Unwind normally so the camera is told to stop sending (see download()); further
+    # signals are ignored so they can't interrupt that cleanup.
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, signal.SIG_IGN)
     raise ClipError("cancelled")
 
 
