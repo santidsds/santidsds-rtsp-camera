@@ -46,6 +46,9 @@ if "--save" in args:
 elif camera == "front":
     say({"progress": 262144})
     say({"ok": True, "path": os.path.join(work, "clip.mp4"), "partial": True})
+elif camera == "locked":
+    say({"ok": False, "error": "login"})
+    sys.exit(1)
 elif camera == "broken":
     say({"ok": False, "error": "no-recording"})
     sys.exit(1)

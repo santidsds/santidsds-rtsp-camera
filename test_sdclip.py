@@ -55,6 +55,18 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(bytes(media.video), b"keynext")
         self.assertEqual(bytes(media.audio), b"", "only G.711 A-law audio is kept")
 
+    def test_a_wrong_length_does_not_swallow_later_frames(self):
+        bad = bytearray(xm(sdclip.VIDEO_P, b"short"))
+        bad[4:8] = struct.pack("<I", 40)  # claims 40 bytes; the next frame starts after 5
+        raw = xm(sdclip.VIDEO_I, b"key") + bytes(bad) + xm(sdclip.VIDEO_P, b"after") + b"\x00" * 64
+        media = sdclip.parse_xm(raw)
+        self.assertEqual(bytes(media.video), b"keyafter")
+
+    def test_frames_of_another_codec_are_skipped(self):
+        raw = (xm(sdclip.VIDEO_I, b"A", kind=3) + xm(sdclip.VIDEO_P, b"a") + xm(sdclip.VIDEO_I, b"B", kind=2)
+               + xm(sdclip.VIDEO_P, b"b") + xm(sdclip.VIDEO_I, b"C", kind=3) + xm(sdclip.VIDEO_P, b"c"))
+        self.assertEqual(bytes(sdclip.parse_xm(raw).video), b"AaCc")
+
     def test_key_frame_time_is_decoded(self):
         stamp = (26 << 26) | (11 << 22) | (15 << 17) | (16 << 12) | (43 << 6) | 11
         self.assertEqual(sdclip.xm_time(stamp), datetime(2026, 11, 15, 16, 43, 11))
@@ -99,6 +111,33 @@ def packet(msg, payload, session=7, version=1):
 
 
 class PacketReaderTests(unittest.TestCase):
+    def test_an_over_long_length_is_cut_at_the_next_header(self):
+        left, right = socket.socketpair()
+        try:
+            liar = motiond._DVRIP_HEADER.pack(255, 1, 7, 0, 1426, 40000) + b"real" * 25
+            right.sendall(liar + packet(1426, b"second") + packet(1426, b"z" * 40000) + packet(1426, b""))
+            reader = sdclip.PacketReader(left, 7)
+            self.assertEqual(reader.packet(), (1426, b"real" * 25))
+            self.assertEqual(reader.packet(), (1426, b"second"))
+            self.assertEqual(reader.packet(), (1426, b"z" * 40000))
+            self.assertEqual(reader.packet(), (1426, b""))
+        finally:
+            left.close()
+            right.close()
+
+    def test_reads_stop_at_the_deadline(self):
+        left, right = socket.socketpair()
+        try:
+            reader = sdclip.PacketReader(left, 7)
+            reader.deadline = time.monotonic() + 0.3
+            began = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                reader.packet()
+            self.assertLess(time.monotonic() - began, 2)
+        finally:
+            left.close()
+            right.close()
+
     def test_finds_the_next_packet_after_a_bad_length(self):
         left, right = socket.socketpair()
         try:
@@ -259,12 +298,23 @@ class FetchTests(unittest.TestCase):
         self.assertTrue(again["cached"])
         self.assertEqual(self.camera.logins, 1, "cached clip needs no second login")
 
-    def test_refused_login_is_tried_once(self):
+    def test_refused_login_is_tried_once_then_cools_down(self):
         self.start(stream=self.stream, files=self.recording(), refuse=True)
-        with self.assertRaises(sdclip.ClipError) as caught:
-            self.fetch()
-        self.assertEqual(caught.exception.code, "login")
-        self.assertEqual(self.camera.logins, 1)
+        for _ in range(2):
+            with self.assertRaises(sdclip.ClipError) as caught:
+                self.fetch()
+            self.assertEqual(caught.exception.code, "login")
+        self.assertEqual(self.camera.logins, 1, "a second tap doesn't add to the camera's failed logins")
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.cache.parent / "xdg-cache")}):
+            marker = sdclip.cache_root() / "c2" / sdclip.LOGIN_REFUSED
+            marker.parent.mkdir(parents=True)
+            marker.touch()
+            motiond.cmd_set_login(self.config, "c3", ask=lambda _: "admin", ask_secret=lambda _: "pw",
+                                  client_class=AcceptingClient)
+            self.assertTrue(marker.exists(), "another camera's login leaves this cooldown alone")
+            motiond.cmd_set_login(self.config, "c2", ask=lambda _: "admin", ask_secret=lambda _: "pw",
+                                  client_class=AcceptingClient)
+            self.assertTrue(marker.exists(), "bridge cameras keep their login; nothing saved")
 
     def test_gap_on_the_card(self):
         self.start(stream=self.stream, files=[])
@@ -280,12 +330,23 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "unsupported")
         self.assertEqual(self.camera.logins, 0)
 
-    def test_stalled_camera_gives_a_partial_clip(self):
+    def test_stalled_camera_gives_a_partial_clip_that_is_not_reused(self):
         self.start(stream=self.stream, files=self.recording(), stall_after=4)
         with mock.patch.object(sdclip, "PACKET_TIMEOUT_SEC", 0.5):
             result = self.fetch()
-        self.assertTrue(result["ok"] and result["partial"])
-        self.assertEqual(self.camera.stops, 1, "download stopped even after a stall")
+            self.assertTrue(result["ok"] and result["partial"])
+            self.assertTrue(result["path"].endswith(".partial.mp4"))
+            self.assertEqual(self.camera.stops, 1, "download stopped even after a stall")
+            again = self.fetch()
+        self.assertFalse(again["cached"])
+        self.assertEqual(self.camera.logins, 2, "a partial clip is fetched again, not reused")
+
+    def test_a_still_from_moments_ago_is_not_cached_as_final(self):
+        self.start(stream=self.stream, files=[entry(datetime.now() - timedelta(minutes=1),
+                                                    datetime.now() + timedelta(minutes=1))])
+        result = sdclip.fetch_clip(self.config, "c2", datetime.now().replace(microsecond=0), root=self.cache)
+        self.assertTrue(result["ok"] and result["path"].endswith(".partial.mp4"),
+                        "the recording is still being written, so ask the camera again next time")
 
     def test_download_is_paced(self):
         self.start(stream=self.stream, files=self.recording())
@@ -327,6 +388,17 @@ class FetchTests(unittest.TestCase):
                 self.fetch()
         self.assertEqual(caught.exception.code, "busy")
         self.assertEqual(self.camera.logins, 0)
+
+
+class AcceptingClient:
+    def __init__(self, *args):
+        pass
+
+    def connect(self):
+        pass
+
+    def close(self):
+        pass
 
 
 class CacheAndSaveTests(unittest.TestCase):

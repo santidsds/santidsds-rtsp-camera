@@ -54,6 +54,9 @@ FocusScope {
     property bool clipPartial: false
     property bool clipPending: false  // a new clip waits for a cancelled download to finish stopping
     property string saveState: ""   // "", "saving", "saved", "error"
+    property string savingPath: ""
+    // A refused login must not be retried by hand: each try counts toward the camera's lockout.
+    readonly property bool clipRetryable: clipError !== "login" && clipError !== "unsupported"
     readonly property var previewItem: selectedIndex >= 0 && selectedIndex < visibleItems.length
         ? visibleItems[selectedIndex] : null
     readonly property bool clipAvailable: previewItem !== null
@@ -108,6 +111,7 @@ FocusScope {
     function saveClip() {
         if (clipState !== "ready" || clipSaver.running || saveState === "saved" || !previewItem) return
         saveState = "saving"
+        savingPath = clipPath
         clipSaver.command = ["python3", clipHelper, "--camera", String(previewItem.cameraId), "--save", clipPath]
         clipSaver.running = true
     }
@@ -301,6 +305,7 @@ FocusScope {
             if (root.clipPending) {
                 root.clipPending = false
                 if (root.clipState === "fetching" && root.clipAvailable) root.startFetch()
+                else root.closeClip()
                 return
             }
             if (root.clipState === "fetching" && !gotResult) {
@@ -313,6 +318,7 @@ FocusScope {
         id: clipSaver
         stdout: StdioCollector { id: saveStdout }
         onExited: function(code) {
+            if (root.savingPath !== root.clipPath) return  // the clip changed meanwhile
             try {
                 var lines = saveStdout.text.trim().split("\n")
                 root.saveState = JSON.parse(lines[lines.length - 1]).ok === true ? "saved" : "error"
@@ -636,10 +642,16 @@ FocusScope {
             MediaPlayer {
                 id: clipPlayer
                 objectName: "clipPlayer"
-                source: root.clipState === "ready" && root.clipPath !== "" ? "file://" + root.clipPath : ""
+                source: root.clipState === "ready" && root.clipPath !== ""
+                    ? "file://" + root.clipPath.split("/").map(encodeURIComponent).join("/") : ""
                 videoOutput: clipVideo
                 audioOutput: AudioOutput {}
                 onSourceChanged: if (source.toString() !== "") play()
+                onErrorOccurred: {
+                    if (root.clipState !== "ready") return
+                    root.clipError = "empty"  // unreadable file; a retry refetches it
+                    root.clipState = "error"
+                }
             }
             VideoOutput {
                 id: clipVideo
@@ -744,7 +756,7 @@ FocusScope {
                 }
                 GlassPill {
                     objectName: "clipRetry"
-                    visible: root.clipState === "error"
+                    visible: root.clipState === "error" && root.clipRetryable
                     text: strings.t("clip.retry")
                     onClicked: root.playClip()
                 }

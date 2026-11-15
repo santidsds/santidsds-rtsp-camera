@@ -14,7 +14,8 @@ prunes itself, and --save copies one to your Videos folder.
       {"ok": true, "path": "<saved copy>"}
 
 Error codes: unsupported, login, unreachable, no-recording, timeout, empty,
-busy, ffmpeg, bad-request, cancelled, failed.
+busy, ffmpeg, bad-request, cancelled, failed. After a refused login no new
+login is tried for 10 minutes (the camera locks the account after a few).
 """
 from __future__ import annotations
 
@@ -46,6 +47,9 @@ PACKET_TIMEOUT_SEC = 10   # one silent gap from the camera
 # ~3x the recording bitrate, so a 25 s clip takes about 8 s.
 RATE_LIMIT_BYTES = 320 * 1024   # per second
 RECEIVE_BUFFER = 64 * 1024
+MAX_DATA_PACKET = 256 * 1024     # cameras send 32 KB playback packets; more means a bad length
+LOGIN_COOLDOWN_SEC = 600         # after a refused login, don't try again for a while (lockout)
+LOGIN_REFUSED = ".login-refused"
 CACHE_MAX_AGE_SEC = 24 * 3600
 CACHE_MAX_BYTES = 400 * 1024 * 1024
 PART_MAX_AGE_SEC = 3600
@@ -111,7 +115,7 @@ def parse_xm(raw: bytes) -> XmMedia:
     next frame marker; a truncated last frame ends the stream.
     """
     media = XmMedia()
-    pos, size, started = 0, len(raw), False
+    pos, size, started, skipping = 0, len(raw), False, False
     while pos + 8 <= size:
         if raw[pos:pos + 3] != b"\x00\x00\x01" or raw[pos + 3] not in MARKERS:
             pos = _next_marker(raw, pos + 1)
@@ -137,16 +141,27 @@ def parse_xm(raw: bytes) -> XmMedia:
                 break
             continue
         end = pos + header + length
-        if end > size:
-            break  # truncated tail
+        # Frames are back to back, and video can't contain a frame marker (H.264/H.265
+        # never start a unit with those bytes). A marker inside the claimed span, or
+        # none where the next frame should start, means the length is wrong.
+        inner = _next_marker(raw, pos + header)
+        follows = end + 4 <= size and raw[end:end + 3] == b"\x00\x00\x01" and raw[end + 3] in MARKERS
+        if (end > size or (inner != -1 and inner < end)
+                or (not follows and end + 4 <= size and _next_marker(raw, end) != -1)):
+            nxt = _next_marker(raw, pos + 1)
+            if nxt < 0:
+                break  # truncated tail
+            pos = nxt
+            continue
         payload = raw[pos + header:end]
-        if marker == VIDEO_I and (not media.codec or media.codec == CODECS[kind]):
-            if not started:
+        if marker == VIDEO_I:
+            if not media.codec:
                 media.codec, media.fps = CODECS[kind], fps
                 media.width, media.height = width * 8, height * 8
                 media.first_time = xm_time(stamp)
-            started = True
-        if started:
+            skipping = CODECS[kind] != media.codec  # another stream's frames; skip until ours return
+            started = started or not skipping
+        if started and not (skipping and marker in (VIDEO_I, VIDEO_P)):
             if marker in (VIDEO_I, VIDEO_P):
                 media.video += payload
                 media.frames += 1
@@ -250,18 +265,25 @@ class PacketReader:
         tail = b"\x00\x00" + struct.pack("<I", session)
         self.signatures = (b"\xff\x00" + tail, b"\xff\x01" + tail)
         self.resyncs = 0
+        self.deadline = None  # time.monotonic() limit for every read
 
     def _fill(self, size: int):
         while len(self.buffer) < size:
+            if self.deadline is not None:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("clip deadline")
+                self.sock.settimeout(min(PACKET_TIMEOUT_SEC, remaining))
             chunk = self.sock.recv(65536)
             if not chunk:
                 raise ConnectionError("camera closed the connection")
             self.buffer += chunk
 
     def _resync(self):
-        skipped = 0
+        skipped, start = 0, 1  # the bad header itself sits at 0 on the first pass only
         while True:
-            hits = [i for i in (self.buffer.find(s, 1) for s in self.signatures) if i > 0]
+            hits = [i for i in (self.buffer.find(s, start) for s in self.signatures) if i >= start]
+            start = 0
             if hits:
                 del self.buffer[:min(hits)]
                 self.resyncs += 1
@@ -273,17 +295,40 @@ class PacketReader:
                 raise ConnectionError("lost the packet stream")
             self._fill(len(self.buffer) + 1)
 
+    def _plausible(self, data, offset: int = 0) -> bool:
+        head, version, _session, _seq, msg, length = motiond._DVRIP_HEADER.unpack_from(data, offset)
+        limit = MAX_DATA_PACKET if msg == PLAYBACK_DATA else motiond.DVRIP_MAX_PACKET
+        return head == 255 and version <= 1 and length <= limit
+
+    def _embedded_header(self, payload: bytes) -> int | None:
+        """Where a real packet header starts inside a payload whose length was too long."""
+        cuts = []
+        for signature in self.signatures:
+            at = payload.find(signature, 1)
+            while at != -1:
+                if len(payload) - at < motiond._DVRIP_HEADER.size or self._plausible(payload, at):
+                    cuts.append(at)
+                    break
+                at = payload.find(signature, at + 1)
+        return min(cuts) if cuts else None
+
     def packet(self) -> tuple[int, bytes]:
         while True:
             self._fill(motiond._DVRIP_HEADER.size)
-            head, version, _session, _seq, msg, length = motiond._DVRIP_HEADER.unpack_from(self.buffer, 0)
-            if head == 255 and version <= 1 and length <= motiond.DVRIP_MAX_PACKET:
+            if self._plausible(self.buffer):
                 break
             self._resync()
+        _head, _version, _session, _seq, msg, length = motiond._DVRIP_HEADER.unpack_from(self.buffer, 0)
         total = motiond._DVRIP_HEADER.size + length
         self._fill(total)
         payload = bytes(self.buffer[motiond._DVRIP_HEADER.size:total])
         del self.buffer[:total]
+        if msg == PLAYBACK_DATA:
+            cut = self._embedded_header(payload)
+            if cut is not None:  # the length was too long: hand the rest back
+                self.buffer[:0] = payload[cut:]
+                payload = payload[:cut]
+                self.resyncs += 1
         return msg, payload
 
     def reply(self, msg_id: int, limit: int = 64) -> dict:
@@ -321,15 +366,20 @@ def download(client, reader: PacketReader, start: datetime, end: datetime,
             "Action": action, "Parameter": params,
             "StartTime": start.strftime(TIME_FORMAT), "EndTime": end.strftime(TIME_FORMAT)}}
 
-    client.send(PLAYBACK_CLAIM, body("Claim"))
-    if reader.reply(PLAYBACK_CLAIM + 1).get("Ret") not in OK_CODES:
-        raise ClipError("no-recording")
-    data, complete, reported = bytearray(), False, 0
-    client.sock.settimeout(PACKET_TIMEOUT_SEC)
-    client.send(PLAYBACK, body("DownloadStart"))
-    began = time.monotonic()
+    data, complete, reported, claimed = bytearray(), False, 0, False
+    reader.deadline = deadline
     try:
+        claimed = True  # from here on, always tell the camera to stop
+        client.send(PLAYBACK_CLAIM, body("Claim"))
+        if reader.reply(PLAYBACK_CLAIM + 1).get("Ret") not in OK_CODES:
+            raise ClipError("no-recording")
+        client.send(PLAYBACK, body("DownloadStart"))
+        began = last_alive = time.monotonic()
+        alive_every = max(2.0, getattr(client, "alive_interval", 20) / 2)
         while time.monotonic() < deadline and len(data) < max_bytes:
+            if time.monotonic() - last_alive > alive_every:
+                client.keepalive()  # long downloads must not let the session expire
+                last_alive = time.monotonic()
             msg, payload = reader.packet()
             if msg == PLAYBACK_DATA:
                 if not payload:
@@ -349,11 +399,12 @@ def download(client, reader: PacketReader, start: datetime, end: datetime,
         if not data:
             raise ClipError("timeout") from None
     finally:
-        try:
-            client.sock.settimeout(5)
-            client.send(PLAYBACK, body("DownloadStop"))
-        except OSError:
-            pass
+        if claimed:
+            try:
+                client.sock.settimeout(5)
+                client.send(PLAYBACK, body("DownloadStop"))
+            except OSError:
+                pass
     if not data and not complete:
         raise ClipError("timeout")
     return bytes(data), complete
@@ -409,27 +460,37 @@ def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None
         raise ClipError("unsupported")
     folder = root / camera_id
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-    prune_cache(root)
-    out = folder / (at.strftime(FILE_TIME_FORMAT) + ".mp4")
+    stem = at.strftime(FILE_TIME_FORMAT)
+    out = folder / (stem + ".mp4")                   # complete clips are reused
+    unfinished = folder / (stem + ".partial.mp4")    # short or still-recording clips are refetched
 
-    def done(cached, window=None, complete=True, duration=None):
-        os.utime(out)
-        result = {"ok": True, "path": str(out), "cached": cached, "partial": not complete}
+    def done(cached, path=out, window=None, complete=True, duration=None):
+        try:
+            os.utime(path)
+        except FileNotFoundError:
+            raise ClipError("failed") from None
+        result = {"ok": True, "path": str(path), "cached": cached, "partial": not complete}
         if window:
             result.update(start=window[0].strftime(TIME_FORMAT), end=window[1].strftime(TIME_FORMAT))
         if duration is not None:
             result["duration"] = round(duration, 1)
         return result
 
-    if out.is_file() and out.stat().st_size > 0:
-        return done(True)
+    refused = folder / LOGIN_REFUSED
     with open(folder / ".lock", "a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ClipError("busy") from None
-        if out.is_file() and out.stat().st_size > 0:
+        prune_cache(root)
+        if playable(out):
             return done(True)
+        out.unlink(missing_ok=True)
+        try:
+            if time.time() - refused.stat().st_mtime < LOGIN_COOLDOWN_SEC:
+                raise ClipError("login")  # don't add to the camera's failed-login count
+        except FileNotFoundError:
+            pass
         deadline = time.monotonic() + DEADLINE_SEC
         client = client_class(login["host"], login["port"], login["user"], login["password"], timeout=10)
         client.receive_buffer = RECEIVE_BUFFER
@@ -437,10 +498,13 @@ def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None
             try:
                 client.connect()  # one attempt: failures count toward the camera's lockout
             except motiond.DvripLoginError:
+                refused.touch()
                 raise ClipError("login") from None
             except OSError:
                 raise ClipError("unreachable") from None
+            refused.unlink(missing_ok=True)
             reader = PacketReader(client.sock, client.session)
+            reader.deadline = deadline
             files = query_files(client, reader, at - timedelta(minutes=3), at + timedelta(minutes=3))
             window = plan_window(files, at)
             if not window:
@@ -450,8 +514,24 @@ def fetch_clip(config_dir: Path, camera_id: str, at: datetime, client_class=None
             raise ClipError("unreachable") from None
         finally:
             client.close()
-        duration = write_mp4(parse_xm(raw), out, ffmpeg)
-        return done(False, window, complete, duration)
+        finished = complete and window[1] < datetime.now() - timedelta(seconds=5)
+        target = out if finished else unfinished
+        duration = write_mp4(parse_xm(raw), target, ffmpeg)
+        if finished:
+            unfinished.unlink(missing_ok=True)
+        return done(False, target, window, complete, duration)
+
+
+def playable(path: Path) -> bool:
+    """A cached clip is reused only if it is still a readable video."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
+                                 "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return True  # can't check; trust the file
+    return result.returncode == 0 and result.stdout.strip() != ""
 
 
 def safe_name(name: str) -> str:
@@ -491,7 +571,10 @@ def save_clip(path: Path, camera_name: str, root: Path | None = None, videos: Pa
 
 
 def emit(data: dict):
-    print(json.dumps(data), flush=True)
+    try:
+        print(json.dumps(data), flush=True)
+    except BrokenPipeError:
+        pass
 
 
 def _cancel(signum, frame):  # noqa: ARG001
@@ -501,8 +584,8 @@ def _cancel(signum, frame):  # noqa: ARG001
 
 def main(argv=None) -> int:
     os.umask(0o077)
-    signal.signal(signal.SIGTERM, _cancel)
-    signal.signal(signal.SIGINT, _cancel)
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, _cancel)
     parser = argparse.ArgumentParser(description="Fetch a clip from a camera's SD card.")
     parser.add_argument("--camera", required=True)
     parser.add_argument("--at")
@@ -522,7 +605,12 @@ def main(argv=None) -> int:
         at = parse_time(args.at)
         if not at:
             raise ClipError("bad-request")
-        emit(fetch_clip(config_dir, args.camera, at, progress=lambda n: emit({"progress": n})))
+        def progress(size):
+            try:
+                print(json.dumps({"progress": size}), flush=True)
+            except BrokenPipeError:
+                raise ClipError("cancelled") from None  # nobody is listening any more
+        emit(fetch_clip(config_dir, args.camera, at, progress=progress))
         return 0
     except ClipError as error:
         emit({"ok": False, "error": error.code})

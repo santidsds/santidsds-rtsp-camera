@@ -863,6 +863,9 @@ def cmd_set_login(config_dir: Path, ref: str, ask=input, ask_secret=getpass.getp
         logins = {}
     logins[camera["id"]] = {"user": user, "password": password}
     _write_private_json(path, logins)
+    if valid_camera_id(camera.get("id")):  # let sdclip.py try this camera again right away
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+        (cache / "rtsp-camera" / "clips" / camera["id"] / ".login-refused").unlink(missing_ok=True)
     print(f"Login OK. Saved for {camera.get('name')} in {path} (readable only by you).")
     return 0
 

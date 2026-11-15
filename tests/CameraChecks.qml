@@ -284,12 +284,13 @@ ShellRoot {
             var gallery = field("motionGallery")
             eventually(function() { return gallery.visible && !gallery.loading && gallery.listenerState !== "" }, 6000)
             gallery.clipHelper = Quickshell.env("CAMERA_TEST_FAKE_CLIP")
-            gallery.clipSources = {front: "dvrip", slow: "dvrip", broken: "dvrip", plain: "onvif"}
+            gallery.clipSources = {front: "dvrip", slow: "dvrip", broken: "dvrip", plain: "onvif", locked: "dvrip"}
             gallery.items = [
                 {name: "f.jpg", path: "/nonexistent/f.jpg", time: "23:00:00", date: gallery.today, cameraId: "front", cameraName: "Front"},
                 {name: "s.jpg", path: "/nonexistent/s.jpg", time: "22:00:00", date: gallery.today, cameraId: "slow", cameraName: "Slow"},
                 {name: "b.jpg", path: "/nonexistent/b.jpg", time: "21:00:00", date: gallery.today, cameraId: "broken", cameraName: "Broken"},
-                {name: "p.jpg", path: "/nonexistent/p.jpg", time: "20:00:00", date: gallery.today, cameraId: "plain", cameraName: "Plain"}]
+                {name: "p.jpg", path: "/nonexistent/p.jpg", time: "20:00:00", date: gallery.today, cameraId: "plain", cameraName: "Plain"},
+                {name: "l.jpg", path: "/nonexistent/l.jpg", time: "19:00:00", date: gallery.today, cameraId: "locked", cameraName: "Locked"}]
             wait(100)
             gallery.selectedIndex = 0
             gallery.forceActiveFocus()
@@ -343,6 +344,12 @@ ShellRoot {
             keyClick(Qt.Key_Escape)
             keyClick(Qt.Key_Right)
             assertOk(!field("clipPlayButton").visible, "cameras without DVRIP don't offer clips")
+            keyClick(Qt.Key_Right)
+            mouseClick(field("clipPlayButton"))
+            eventually(function() { return gallery.clipState === "error" }, 4000)
+            assertOk(field("clipErrorMessage").visible && !field("clipRetry").visible,
+                "a refused login offers no retry (each try counts toward a lockout)")
+            keyClick(Qt.Key_Escape)
             keyClick(Qt.Key_Escape)
             keyClick(Qt.Key_Escape)
             panel.close()
