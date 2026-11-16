@@ -105,22 +105,34 @@ when installed, otherwise Inter, otherwise the Omarchy font.
   to save one still now. Without the service you can still browse stills already on
   disk; opening **Motion** only lists files, it does not start the loop.
 
-- **Play a motion clip from the SD card** — in the Motion viewer, **Play Clip**
-  (Spanish: *Ver clip*) fetches the recording around that still straight from
-  the camera's SD card: from 4 s before it to at least 20 s after, extended to
-  the end of the camera's motion recording (max 90 s). Space plays/pauses,
-  Esc returns to the still, ←/→ move on (and cancel a download).
-  - Works for cameras reached over DVRIP (XMeye/iCSee: behind the go2rtc
-    bridge, or with a login saved by `motiond.py --set-login`).
-  - Only the tapped clip is downloaded — nothing is synced in the background.
-    Clips stay in `~/.cache/rtsp-camera/clips/` (0700, files 0600) for 24 h
-    (400 MB max); the download button copies one to
-    `Videos/Cameras/<camera>/`.
-  - Video is remuxed, not re-encoded (HEVC/H.264 → MP4, G.711 audio → AAC).
-  - Gentle on weak cameras: one login per tap, no automatic retries, downloads
-    paced to ~320 KB/s, always stopped on cancel; a camera that stalls gives a
-    partial clip, marked as such.
-  - CLI: `python3 sdclip.py --camera <id> --at "YYYY-MM-DD HH:MM:SS"`.
+- **Recordings (SD card)** — the third tab, for cameras reached over DVRIP
+  (XMeye/iCSee: behind the go2rtc bridge, or with a login saved by
+  `motiond.py --set-login`). Pick a day from the card, see the day on a
+  24-hour timeline (recorded time, motion density per 10 minutes, a box for
+  the hour shown below) and a one-hour close-up with a playhead and its time;
+  motion events are listed as chips. It opens on the day's latest event.
+  - **Nothing is saved:** `sdclip.py --play` streams the card through memory to
+    a private `127.0.0.1` URL (MPEG-TS; video copied, G.711 audio to AAC). A
+    paused player pauses the camera; a jump starts a new session. Sessions
+    stop at gaps and chain until the day ends.
+  - **Speed menu:** 0.25×–4×, and the speed used while pressing and holding
+    the video (1.5×/2×/4×).
+  - **Gestures (mouse or touch):** tap plays/pauses; double tap on the right
+    half +10 s, on the left half −10 s; press and hold plays at the hold
+    speed until you let go.
+  - **Keys:** Space play/pause, ←/→ ±10 s, ↑/↓ previous/next motion,
+    `,` `.` previous/next hour, `[` `]` slower/faster, `1` normal speed,
+    `F` full screen (controls float and hide when idle), `L`/`M`/`R` tabs.
+- **Motion → Recordings** — Motion groups stills by hour and collapses
+  bursts (one camera, < 1 min apart) into one tile with ×N; filters Last
+  hour / Today / Last night; the toolbar's camera menu filters by camera.
+  A still's main action is **Watch in Recordings** at that moment (3 s
+  before); **Save clip** downloads just that clip (`sdclip.py --at`) and copies
+  it to `Videos/Cameras/<camera>/`. Live tiles show the camera's latest
+  motion ("Motion 19:58 ›") as a shortcut into Recordings.
+  - Gentle on weak cameras: one login per action, no automatic retries
+    (10-minute pause after a refused login), downloads paced, always
+    stopped on cancel.
 
 - **Stream pauses for the gallery** — player tears down while Motion is open;
   **Live** reconnects.
@@ -137,8 +149,9 @@ when installed, otherwise Inter, otherwise the Omarchy font.
 
 - **Tests** — `test_motiond.py` (prune/list/creds, bridge resolution, per-camera
   storage, a fake DVRIP camera; no network), `test_sdclip.py` (XM parsing,
-  clip window, packet recovery, a fake camera end to end with real HEVC,
-  pacing, cancel, cache, save) + existing
+  clip window, packet recovery, TS output, day index, streamed playback and
+  a fake camera end to end with real HEVC, pacing, cancel, cache, save) +
+  existing
   `test_config.py`. `.gitignore` also excludes `motion.json`,
   `appearance.json`, `position-*.json`, `.profiles.lock`, `.status.json`.
 
