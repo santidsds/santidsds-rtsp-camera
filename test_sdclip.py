@@ -405,7 +405,8 @@ class FetchTests(unittest.TestCase):
         self.assertIn("audio", streams)
         thread.join(10)
         self.assertTrue(result["value"]["ended"])
-        self.assertEqual(said[1], {"first": AT.strftime(sdclip.TIME_FORMAT)}, "the first frame's clock time")
+        self.assertEqual(said[1]["first"], AT.strftime(sdclip.TIME_FORMAT), "the first frame's clock time")
+        self.assertIn(said[1]["codec"], ("h264", "hevc"))
         self.assertEqual((self.camera.claims, self.camera.stops), (1, 1))
         self.assertFalse(any(p.suffix == ".mp4" for p in self.cache.rglob("*")), "nothing written to disk")
 

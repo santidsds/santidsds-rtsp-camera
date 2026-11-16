@@ -921,7 +921,7 @@ def _pump_to_player(client, reader: PacketReader, begin: datetime, end: datetime
         video_read, video_write = os.pipe()
         timing["ts"], timing["fps"] = TsVideoWriter(media.codec), float(media.fps or 12)
         if say and media.first_time:  # the stream starts at a key frame, a little before `begin`
-            say({"first": media.first_time.strftime(TIME_FORMAT)})
+            say({"first": media.first_time.strftime(TIME_FORMAT), "codec": media.codec})
         command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
                    "-thread_queue_size", "1024", "-analyzeduration", "1000000", "-probesize", "1000000",
                    "-f", "mpegts", "-i", f"pipe:{video_read}"]
