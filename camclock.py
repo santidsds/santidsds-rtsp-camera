@@ -21,7 +21,7 @@ import motiond
 TIME_QUERY = 1452
 TIME_SET = 1450
 FORMAT = "%Y-%m-%d %H:%M:%S"
-POLLS = 40
+TICK_WAIT_SEC = 1.5  # a second always turns within this, however fast the camera answers
 
 
 def query(client) -> tuple[float, float]:
@@ -36,7 +36,8 @@ def query(client) -> tuple[float, float]:
 def wait_for_tick(client) -> tuple[float, float] | None:
     """Poll until the camera's second changes: (its new second, PC time then)."""
     first, _ = query(client)
-    for _ in range(POLLS):
+    deadline = time.monotonic() + TICK_WAIT_SEC
+    while time.monotonic() < deadline:
         value, at = query(client)
         if value != first:
             return value, at
