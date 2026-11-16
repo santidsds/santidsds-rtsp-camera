@@ -15,8 +15,10 @@ from __future__ import annotations
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import motiond
+import sdclip
 
 TIME_QUERY = 1452
 TIME_SET = 1450
@@ -69,6 +71,43 @@ def correct(client, tolerance: float = 0.5) -> tuple[float | None, float | None]
     return before, measure(client)
 
 
+def keep(config_dir: Path, camera: dict, root: Path, client_class=None) -> tuple[str, bool]:
+    """Check and correct one camera's clock: (what happened, ok).
+
+    Failed logins count toward the camera's lockout. After a refusal this never tries
+    again on its own: it waits until a login succeeds elsewhere (SD playback) or a new
+    login is saved, which both clear the shared .login-refused marker."""
+    name = str(camera.get("name") or camera.get("id"))[:40]
+    if not motiond.valid_camera_id(camera.get("id")):
+        return f"{name}: skipped", True
+    try:
+        login, folder = sdclip.camera_target(config_dir, camera["id"], root)
+    except sdclip.ClipError:
+        return f"{name}: no DVRIP login", True
+    refused = folder / sdclip.LOGIN_REFUSED
+    if refused.exists():
+        return f"{name}: skipped, its last login was refused (waiting for a working login)", False
+    client_class = client_class or motiond.DvripClient
+    client = client_class(login["host"], login["port"], login["user"], login["password"], timeout=10)
+    try:
+        client.connect()
+        refused.unlink(missing_ok=True)
+        before, after = correct(client)
+        if before is None:
+            return f"{name}: clock unreadable", False
+        if after is None:
+            return f"{name}: {before:+.2f} s, left as it is", True
+        return f"{name}: {before:+.2f} s, set to {after:+.2f} s", True
+    except motiond.DvripLoginError as error:
+        if error.code in sdclip.REFUSING_LOGIN_CODES:
+            refused.touch()
+        return f"{name}: login refused", False
+    except (OSError, ConnectionError, KeyError, ValueError) as error:
+        return f"{name}: {type(error).__name__}", False
+    finally:
+        client.close()
+
+
 def main() -> int:
     config_dir, _ = motiond.base_dirs()
     library = motiond.load_json(config_dir / "config.json", {})
@@ -76,29 +115,9 @@ def main() -> int:
     for camera in (library.get("cameras") or []) if isinstance(library, dict) else []:
         if not isinstance(camera, dict):
             continue
-        login = motiond.dvrip_login_for(config_dir, camera)
-        if not login:
-            continue
-        name = str(camera.get("name") or camera.get("id"))[:40]
-        client = motiond.DvripClient(login["host"], login["port"], login["user"], login["password"], timeout=10)
-        try:
-            client.connect()
-            before, after = correct(client)
-            if before is None:
-                print(f"{name}: clock unreadable")
-                status = 1
-            elif after is None:
-                print(f"{name}: {before:+.2f} s, left as it is")
-            else:
-                print(f"{name}: {before:+.2f} s, set to {after:+.2f} s")
-        except motiond.DvripLoginError:
-            print(f"{name}: login refused")
-            status = 1
-        except (OSError, ConnectionError, KeyError, ValueError) as error:
-            print(f"{name}: {type(error).__name__}")
-            status = 1
-        finally:
-            client.close()
+        message, ok = keep(config_dir, camera, sdclip.cache_root())
+        print(message)
+        status = status if ok else 1
     return status
 
 

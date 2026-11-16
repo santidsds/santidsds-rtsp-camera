@@ -1,9 +1,14 @@
 """Tests for camclock.py with a simulated camera clock (whole seconds, own phase)."""
+import json
+import tempfile
 import time
 import unittest
 from datetime import datetime
+from pathlib import Path
 
 import camclock
+import motiond
+import sdclip
 
 
 class FakeClock:
@@ -51,6 +56,43 @@ class CamClockTest(unittest.TestCase):
         before, after = camclock.correct(clock)
         self.assertIsNone(after)
         self.assertEqual(clock.sets, 0)
+
+
+class RefusingCamera:
+    """A camera that refuses the login (wrong password); counts the attempts."""
+    attempts = 0
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def connect(self):
+        RefusingCamera.attempts += 1
+        raise motiond.DvripLoginError(203)
+
+    def close(self):
+        pass
+
+
+class RefusedLoginTest(unittest.TestCase):
+    def test_a_refused_login_is_not_tried_again_until_a_new_one_is_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config, root = Path(tmp) / "config", Path(tmp) / "clips"
+            config.mkdir()
+            camera = {"id": "a" * 32, "name": "Yard", "url": "rtsp://127.0.0.1:8554/yard"}
+            (config / "config.json").write_text(json.dumps({"cameras": [camera]}))
+            (config / "go2rtc.private.json").write_text(json.dumps(
+                {"streams": {"yard": "dvrip://admin:old@192.0.2.10:34567?channel=0&subtype=0"}}))
+            RefusingCamera.attempts = 0
+            message, ok = camclock.keep(config, camera, root, RefusingCamera)
+            self.assertEqual((message, ok), ("Yard: login refused", False))
+            self.assertTrue((root / camera["id"] / sdclip.LOGIN_REFUSED).exists(), "shared with SD playback")
+            for _ in range(3):  # the hourly timer, later on
+                message, ok = camclock.keep(config, camera, root, RefusingCamera)
+                self.assertIn("skipped", message)
+            self.assertEqual(RefusingCamera.attempts, 1, "one failed login, not one per hour")
+            (root / camera["id"] / sdclip.LOGIN_REFUSED).unlink()  # a new login was saved (or one worked)
+            camclock.keep(config, camera, root, RefusingCamera)
+            self.assertEqual(RefusingCamera.attempts, 2)
 
 
 if __name__ == "__main__":
