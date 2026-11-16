@@ -405,14 +405,41 @@ ShellRoot {
             eventually(function() { return view.playState === "paused" }, 2000)
             keyClick(Qt.Key_Space)
             eventually(function() { return view.playState === "playing" }, 2000)
-            // Speed: buttons and 1-4 keys.
-            mouseClick(field("speed4"))
-            equal(player.playbackRate, 4, "4x speed")
+            // Speed menu (0.25x-4x); [ ] step through speeds, 1 resets.
+            var speedButton = field("recordingSpeedButton")
+            var speedMenu = find(speedButton, function(i) { return i.objectName === "recordingSpeedMenu" })
+            mouseClick(speedButton)
+            eventually(function() { return speedMenu.opened }, 2000)
+            mouseClick(find(speedMenu.contentItem, function(i) { return i.objectName === "speed4" }))
+            equal(player.playbackRate, 4, "4x from the speed menu")
+            eventually(function() { return !speedMenu.opened }, 2000)
             var fastFrom = view.position
             wait(1500)
             assertOk(view.position - fastFrom > 3, "at 4x the clock moves faster: " + (view.position - fastFrom))
             keyClick(Qt.Key_1)
             equal(player.playbackRate, 1, "1 key: normal speed")
+            keyClick(Qt.Key_BracketLeft)
+            equal(view.speed, 0.5, "[ slows down")
+            keyClick(Qt.Key_BracketLeft)
+            equal(view.speed, 0.25, "down to 0.25x")
+            keyClick(Qt.Key_1)
+            // The play controls sit in the middle.
+            var play = field("recordingPlay"), stage = field("recordingStage")
+            var playCenter = play.mapToItem(stage, play.width / 2, 0).x
+            assertOk(Math.abs(playCenter - stage.width / 2) < 3, "play button centred: " + playCenter + " vs " + stage.width / 2)
+            // Gestures: press and hold plays at the hold speed; a tap pauses and resumes.
+            var gestures = field("recordingGestures")
+            mousePress(gestures, gestures.width / 2, gestures.height / 2)
+            wait(700)
+            assertOk(view.holding && player.playbackRate === 2 && field("holdBadge").visible, "press and hold plays at 2x")
+            mouseRelease(gestures, gestures.width / 2, gestures.height / 2)
+            wait(400)
+            assertOk(!view.holding && player.playbackRate === 1 && view.playState === "playing",
+                "letting go returns to normal speed and keeps playing")
+            mouseClick(gestures, gestures.width / 2, gestures.height / 2)
+            eventually(function() { return view.playState === "paused" }, 2000)
+            mouseClick(gestures, gestures.width / 2, gestures.height / 2)
+            eventually(function() { return view.playState === "playing" }, 2000)
             // Hours: , and . move the close-up.
             var hour = view.hourStart
             keyClick(Qt.Key_Period)
@@ -431,12 +458,19 @@ ShellRoot {
             keyClick(Qt.Key_F)
             assertOk(!panel.fullscreen && !view.immersive, "F leaves full screen")
             eventually(function() { return view.playState === "playing" }, 8000)
-            // Forward 10 s starts a new session from the new moment and stops the old one.
+            // Double tap on the right: +10 s (a new session from the new moment; the old one stops).
             var before = view.position
-            keyClick(Qt.Key_Right)
+            mouseDoubleClickSequence(gestures, gestures.width * 0.8, gestures.height / 2)
+            assertOk(field("seekFlash").visible, "a double tap shows the jump")
             eventually(function() { return readWork("play-calls").split("\n").filter(function(l) { return l }).length >= 2 }, 4000)
             eventually(function() { return view.playState === "playing" }, 8000)
-            assertOk(Math.abs(view.position - (before + 10)) < 3, "forward 10 s lands 10 s later: " + view.position + " vs " + before)
+            assertOk(Math.abs(view.position - (before + 10)) < 3, "double tap right lands 10 s later: " + view.position + " vs " + before)
+            // ... and on the left: -10 s.
+            before = view.position
+            mouseDoubleClickSequence(gestures, gestures.width * 0.2, gestures.height / 2)
+            eventually(function() { return readWork("play-calls").split("\n").filter(function(l) { return l }).length >= 3 }, 4000)
+            eventually(function() { return view.playState === "playing" }, 8000)
+            assertOk(Math.abs(view.position - (before - 10)) < 3, "double tap left lands 10 s earlier: " + view.position + " vs " + before)
             // Next motion event.
             keyClick(Qt.Key_Down)
             eventually(function() { return readWork("play-calls").indexOf(today + " 11:59:57") >= 0 }, 4000)
@@ -455,7 +489,7 @@ ShellRoot {
             assertOk(!panel.showingRecordings, "Esc returns to live view")
             panel.close()
             panel.configured = false
-            console.log("PASS: recordings opens on the latest event, motion jump, play/pause, speed, hours, immersive full screen, ±10 s, next motion, day switch, unsupported, Esc")
+            console.log("PASS: recordings opens on the latest event, motion jump, play/pause, speed menu and keys, centred controls, hold/tap/double-tap gestures, hours, immersive full screen, next motion, day switch, unsupported, Esc")
         }
         function runDualView() {
             panel.close()
