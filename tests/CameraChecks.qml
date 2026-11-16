@@ -270,12 +270,15 @@ ShellRoot {
             mouseClick(field("filterHour"))
             equal(gallery.groups.length, 2, "Last hour leaves out older events")
             mouseClick(field("filterAll"))
-            panel.motionCameraFilter = "back"
+            panel.motionCameraFilter = "gone"
+            equal(panel.activeMotionFilter, "", "a filter for a camera that no longer exists is ignored")
+            panel.motionCameraFilter = ""
+            gallery.cameraFilter = "back"  // what the toolbar menu sets (this test panel has no camera list)
             wait(50)
-            assertOk(gallery.cameraFilter === "back" && gallery.visibleItems.length === 2, "the toolbar's camera menu filters Motion")
+            assertOk(gallery.visibleItems.length === 2, "the camera filter shows one camera")
             assertOk(!find(gallery, function(i) { return i.objectName === "stillCameraName" && i.visible }),
                 "camera names hide while filtered to one camera")
-            panel.motionCameraFilter = ""
+            gallery.cameraFilter = ""
             // Listener status: per-camera format and the older flat one.
             var mixed = gallery.summarizeStatus({enabled: true, cameras: {
                 front: {name: "Front", listening: true}, back: {name: "Back", listening: false, lastError: "ConnectionRefusedError"}}})
@@ -392,6 +395,10 @@ ShellRoot {
             eventually(function() { return view.playState === "playing" && player.hasVideo }, 8000)
             assertOk(readWork("play-calls").indexOf("front " + today + " 06:39:34") >= 0, "playback starts 3 s before the motion")
             assertOk(field("recordingClock").children[0].text.indexOf("06:39") >= 0, "the clock follows playback")
+            var bubble = find(field("hourPlayhead"), function(i) { return i.objectName === "playheadTime" })
+            assertOk(field("hourPlayhead").visible && bubble.visible
+                && find(bubble, function(i) { return typeof i.text === "string" && i.text.indexOf("06:39") === 0 }),
+                "the playhead shows where you are, with the time")
             wait(600)
             capture(content, "recordings-playing")
             keyClick(Qt.Key_Space)

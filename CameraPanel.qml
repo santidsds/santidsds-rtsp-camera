@@ -23,6 +23,9 @@ Panel {
     readonly property bool browsing: showingMotion || showingRecordings
     // Motion's camera filter ("" = all cameras), chosen in the toolbar's camera menu.
     property string motionCameraFilter: ""
+    readonly property string activeMotionFilter: cameras.some(function(camera) { return camera.id === motionCameraFilter })
+        ? motionCameraFilter : ""
+    property bool tabAnimating: false  // the card's height eases while switching tabs
     // Latest motion per camera from motiond's status: id -> {date, time}.
     property var lastMotionByCamera: ({})
     property bool fullscreen: false
@@ -128,11 +131,12 @@ Panel {
     }
     // Watch a moment in Recordings (from a motion still or Live's last-motion chip):
     // 3 s before it, on that camera and day.
-    function openRecordingsAt(cameraId, day, time) {
+    function openRecordingsAt(cameraId, day, time, from) {
         var parts = String(time).split(":")
         if (parts.length !== 3 || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return
         var at = Math.max(0, (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]) - 3)
         recordingsView.openAt(cameraId, day, at)
+        recordingsView.returnTo = from || ""
         var index = cameras.findIndex(function(camera) { return camera.id === cameraId })
         if (index >= 0 && index !== selectedCameraIndex) runProfileOperation({action: "select", id: cameraId})
         openRecordings()
@@ -145,8 +149,20 @@ Panel {
         var event = lastMotionByCamera[cameraId || ""]
         if (event) openRecordingsAt(cameraId, event.date, event.time)
     }
+    // After a menu or a tab, keys go back to the view (Space, arrows...).
+    function refocusView() {
+        if (showingRecordings) recordingsView.forceActiveFocus()
+        else if (showingMotion) motionGallery.forceActiveFocus()
+        else content.forceActiveFocus()
+    }
+    function animateTabChange() {
+        tabAnimating = true
+        tabAnimationEnd.restart()
+    }
     function showTab(index) {
         if (!configured) return
+        animateTabChange()
+        Qt.callLater(refocusView)
         if (index === 1) openMotionGallery()
         else if (index === 2) openRecordings()
         else {
@@ -428,6 +444,7 @@ Panel {
             if (root.sizeDirty) sizeSaveTimer.restart()
         }
     }
+    Timer { id: tabAnimationEnd; interval: 260; onTriggered: root.tabAnimating = false }
     // Live's "last motion" chips: motiond's status has each camera's latest event.
     Process {
         id: motionStatus
@@ -553,6 +570,10 @@ Panel {
         }
         readonly property real pageNaturalHeight: root.configuring ? chromeHeight + settingsColumn.implicitHeight
             : root.browsing ? root.viewerHeight : liveNaturalHeight
+        Behavior on contentHeight {
+            enabled: root.tabAnimating && !root.fullscreen
+            NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic }
+        }
         contentHeight: root.fullscreen
             ? popup.availableCardHeight
             // The appearance inspector grows the card to fit while it is open.
@@ -630,7 +651,7 @@ Panel {
                             id: cameraSelector
                             objectName: "cameraSelector"
                             readonly property real naturalWidth: 18 + selectorName.advanceWidth + 7 + 14
-                                + (root.configured && !root.configuring && !root.browsing ? 8 + 7 : 0)
+                                + (root.configured && !root.configuring ? 8 + 7 : 0)
                             TextMetrics {
                                 id: selectorName
                                 font.family: ui.font
@@ -644,8 +665,8 @@ Panel {
                             Layout.preferredWidth: Math.min(naturalWidth, 280)
                             implicitHeight: ui.controlHeight
                             readonly property bool filtering: root.showingMotion && root.cameras.length > 1
-                            readonly property int filterIndex: root.motionCameraFilter === "" ? 0
-                                : 1 + root.cameras.findIndex(function(camera) { return camera.id === root.motionCameraFilter })
+                            readonly property int filterIndex: root.activeMotionFilter === "" ? 0
+                                : 1 + root.cameras.findIndex(function(camera) { return camera.id === root.activeMotionFilter })
                             model: filtering ? [{id: "", name: strings.t("motion.allCameras")}].concat(root.cameras) : root.cameras
                             textRole: "name"
                             currentIndex: filtering ? filterIndex : root.selectedCameraIndex
@@ -654,8 +675,12 @@ Panel {
                             hoverEnabled: true
                             Accessible.name: strings.t("menu.select")
                             onActivated: function(index) {
-                                if (filtering) root.motionCameraFilter = index === 0 ? "" : root.cameras[index - 1].id
-                                else root.selectCamera(index)
+                                if (filtering) {
+                                    root.motionCameraFilter = index === 0 ? "" : root.cameras[index - 1].id
+                                    if (index > 0 && index - 1 !== root.selectedCameraIndex)
+                                        root.runProfileOperation({action: "select", id: root.cameras[index - 1].id})
+                                } else root.selectCamera(index)
+                                Qt.callLater(root.refocusView)
                             }
                             contentItem: Item {
                                 Row {
@@ -666,7 +691,8 @@ Panel {
                                     StatusDot {
                                         id: selectorDot
                                         objectName: "headerStatusDot"
-                                        visible: root.configured && !root.configuring && !root.browsing
+                                        visible: root.configured && !root.configuring
+                                        opacity: root.browsing ? 0 : 1
                                         anchors.verticalCenter: parent.verticalCenter
                                         tone: primaryFeed.statusColor
                                         pulsing: primaryFeed.connecting
@@ -1237,9 +1263,12 @@ Panel {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         focus: root.showingMotion
-                        cameraFilter: root.motionCameraFilter
+                        cameraFilter: root.activeMotionFilter
                         onClosed: root.closeMotionGallery()
-                        onOpenInRecordings: function(cameraId, date, time) { root.openRecordingsAt(cameraId, date, time) }
+                        onOpenInRecordings: function(cameraId, date, time) { root.openRecordingsAt(cameraId, date, time, "motion") }
+                        // Each visit fades in.
+                        opacity: visible ? 1 : 0
+                        Behavior on opacity { NumberAnimation { duration: Style.duration(150); easing.type: Easing.OutCubic } }
                     }
                     RecordingsView {
                         id: recordingsView
@@ -1253,6 +1282,10 @@ Panel {
                         cameraName: root.selectedCameraIndex >= 0 ? root.cameras[root.selectedCameraIndex].name : ""
                         immersive: root.fullscreen
                         onClosed: root.closeRecordings()
+                        onBackRequested: { root.animateTabChange(); root.openMotionGallery(); Qt.callLater(root.refocusView) }
+                        onFullscreenRequested: root.toggleFullscreen()
+                        opacity: visible ? 1 : 0
+                        Behavior on opacity { NumberAnimation { duration: Style.duration(150); easing.type: Easing.OutCubic } }
                     }
                 }
             }

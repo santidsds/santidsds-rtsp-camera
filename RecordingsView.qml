@@ -59,6 +59,10 @@ FocusScope {
     readonly property var speeds: [1, 1.5, 2, 4]
     property url lastFrame: ""        // the frame on screen when a jump started, shown dimmed
     property bool controlsShown: true
+    property string returnTo: ""      // "motion" when opened from a motion still: offer the way back
+    readonly property bool narrow: width < 600
+    signal backRequested()
+    signal fullscreenRequested()
     readonly property real dayLength: 86400
     readonly property bool showingVideo: playState === "playing" || playState === "paused"
     readonly property real position: showingVideo && sessionStart >= 0
@@ -121,10 +125,13 @@ FocusScope {
     }
     function selectDay(value) {
         if (value === day && indexState === "ready") return
+        pendingOpen = null
+        returnTo = ""
         stopPlayback()
         playState = ""
         cursor = -1
         hourOverride = -1
+        day = value  // highlight the chosen day right away
         loadIndex(value)
     }
     // Open a moment (from a motion still, or Live's last-motion chip).
@@ -190,6 +197,10 @@ FocusScope {
     // --- playback ----------------------------------------------------------------
     function requestPlay(at, continuing) {
         if (!day || indexState !== "ready") return
+        if (showingVideo) {  // keep what's on screen, dimmed, until the new moment arrives
+            video.grabToImage(function(result) { root.lastFrame = result.url })
+            player.pause()
+        }
         cursor = Math.max(0, Math.min(dayLength - 1, at))
         hourOverride = -1
         chaining = continuing === true
@@ -201,9 +212,6 @@ FocusScope {
         debounce.restart()
     }
     function startSession() {
-        // Keep what was on screen, dimmed, until the new moment arrives.
-        if (player.playbackState !== MediaPlayer.StoppedState && video.visible)
-            video.grabToImage(function(result) { root.lastFrame = result.url })
         player.stop()
         playUrl = ""
         playState = "connecting"
@@ -309,6 +317,7 @@ FocusScope {
             loadIndex(day)  // today keeps recording: refresh on the way back in
     }
     onCameraIdChanged: {
+        if (pendingOpen && pendingOpen.camera !== cameraId) { pendingOpen = null; returnTo = "" }
         stopPlayback()
         playState = ""
         days = []; ranges = []; motion = []; density = []; chipLabels = []; stills = []
@@ -335,8 +344,9 @@ FocusScope {
     Timer { id: debounce; interval: 250; onTriggered: root.startSession() }
     Timer {
         id: idle
-        interval: 2500
-        onTriggered: if (root.immersive && root.playState === "playing" && !controlsHover.hovered) root.controlsShown = false
+        interval: 3000
+        onTriggered: if (root.immersive && root.playState === "playing" && !controlsHover.hovered && !dayMenu.opened)
+            root.controlsShown = false
     }
 
     Process {
@@ -344,13 +354,19 @@ FocusScope {
         property string requested: ""
         stdout: StdioCollector { id: indexOut }
         onExited: function(code) {
-            if (requested !== root.cameraId) { root.indexState = ""; if (root.active) root.loadIndex(""); return }
+            if (requested !== root.cameraId) {  // the camera changed meanwhile: load the new one once
+                root.indexState = ""
+                root.pendingDay = ""
+                if (root.active) root.loadIndex("")
+                return
+            }
             var lines = indexOut.text.trim().split("\n"), result = null
             try { result = JSON.parse(lines[lines.length - 1]) } catch (error) {}
             if (result && result.ok === true) root.applyIndex(result)
             else {
                 root.indexError = result && result.error ? String(result.error) : "failed"
                 root.indexState = "error"
+                root.pendingOpen = null
             }
             if (root.pendingDay !== "") {
                 var next = root.pendingDay === "-" ? "" : root.pendingDay
@@ -449,7 +465,7 @@ FocusScope {
         anchors.right: parent.right
         anchors.top: parent.top
         height: visible ? ui.controlHeight : 0
-        visible: !root.immersive
+        visible: !root.immersive && !(root.indexState === "error" && root.indexError === "unsupported")
         spacing: 6
         DayStrip {
             Layout.fillWidth: true
@@ -507,10 +523,15 @@ FocusScope {
             anchors.fill: parent
             hoverEnabled: root.immersive
             cursorShape: root.immersive && !root.controlsShown ? Qt.BlankCursor
-                : root.showingVideo ? Qt.PointingHandCursor : Qt.ArrowCursor
+                : root.showingVideo || root.canPlay ? Qt.PointingHandCursor : Qt.ArrowCursor
             onPositionChanged: root.showControls()
-            onClicked: { root.forceActiveFocus(); root.showControls(); if (root.showingVideo) root.togglePlay() }
-            onDoubleClicked: root.togglePlay()
+            onClicked: { root.forceActiveFocus(); root.showControls(); singleClick.restart() }
+            onDoubleClicked: { singleClick.stop(); root.fullscreenRequested() }
+            Timer {  // a click plays/pauses unless it was the first half of a double-click
+                id: singleClick
+                interval: 220
+                onTriggered: if (root.showingVideo || (root.canPlay && root.playState !== "connecting")) root.togglePlay()
+            }
         }
 
         // The moment on screen.
@@ -538,13 +559,22 @@ FocusScope {
             }
         }
 
+        GlassPill {
+            objectName: "recordingBackToMotion"
+            visible: root.returnTo === "motion" && (!root.immersive || root.controlsShown)
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 12
+            text: "‹ " + strings.t("view.motion")
+            onClicked: root.backRequested()
+        }
+
         // Big play button over the cover (nothing plays until asked: each start is a camera login).
         Controls.Button {
             id: bigPlay
             objectName: "recordingBigPlay"
             anchors.centerIn: parent
-            visible: root.canPlay && root.cursor >= 0
-                && (root.playState === "" || root.playState === "ended" || root.playState === "paused")
+            visible: root.canPlay && root.cursor >= 0 && (root.playState === "" || root.playState === "ended")
             width: 64
             height: 64
             hoverEnabled: true
@@ -574,7 +604,7 @@ FocusScope {
         Rectangle {
             id: statusPill
             objectName: "recordingStatus"
-            readonly property string mode: root.indexState === "loading" ? "index"
+            readonly property string mode: root.indexState === "loading" && !root.showingVideo ? "index"
                 : root.indexState === "error" ? "indexError"
                 : root.playState === "connecting" ? "connecting"
                 : root.playState === "error" ? "error"
@@ -646,7 +676,7 @@ FocusScope {
         border.width: root.immersive ? 1 : 0
         border.color: Qt.rgba(1, 1, 1, 0.10)
         opacity: !root.immersive || root.controlsShown ? 1 : 0
-        visible: opacity > 0
+        visible: opacity > 0 && root.indexState !== "error"
         Behavior on opacity { NumberAnimation { duration: Style.duration(220); easing.type: Easing.OutCubic } }
         HoverHandler { id: controlsHover; onHoveredChanged: if (hovered) root.showControls() }
 
@@ -662,7 +692,8 @@ FocusScope {
                 Layout.fillWidth: true
                 spacing: 8
                 Item {
-                    Layout.preferredWidth: Math.max(dayMenuButton.visible ? dayMenuButton.implicitWidth : 0, motionCount.implicitWidth)
+                    Layout.preferredWidth: root.narrow && !root.immersive ? 0
+                        : Math.max(dayMenuButton.visible ? dayMenuButton.implicitWidth : 0, motionCount.implicitWidth)
                     implicitHeight: transport.height
                     Controls.Button {
                         id: dayMenuButton
@@ -699,6 +730,8 @@ FocusScope {
                         PointerArea {}
                         Controls.Popup {
                             id: dayMenu
+                            focus: true
+                            onClosed: root.forceActiveFocus()
                             y: -height - 6
                             width: 200
                             height: Math.min(320, dayMenuList.contentHeight + 10)
@@ -734,7 +767,7 @@ FocusScope {
                     MacText {
                         id: motionCount
                         objectName: "motionEventCount"
-                        visible: !root.immersive && root.indexState === "ready"
+                        visible: !root.immersive && !root.narrow && root.indexState === "ready"
                         anchors.verticalCenter: parent.verticalCenter
                         text: root.motion.length ? strings.tn("recordings.motionCount", root.motion.length)
                             .arg(Commons.I18n.formatNumber(root.motion.length)) : strings.t("recordings.noMotion")
@@ -831,7 +864,10 @@ FocusScope {
                     }
                 }
                 Item { Layout.fillWidth: true }
-                Item { Layout.preferredWidth: Math.max(dayMenuButton.visible ? dayMenuButton.implicitWidth : 0, motionCount.implicitWidth) }
+                Item {
+                    Layout.preferredWidth: root.narrow && !root.immersive ? 0
+                        : Math.max(dayMenuButton.visible ? dayMenuButton.implicitWidth : 0, motionCount.implicitWidth)
+                }
             }
 
             Timeline {
@@ -862,6 +898,7 @@ FocusScope {
                     from: root.hourStart
                     to: root.hourStart + 3600
                     tickEvery: 600
+                    showTime: true
                     tickLabel: function(value) { return root.clock(value, false) }
                 }
                 MacToolbarButton {
@@ -918,12 +955,12 @@ FocusScope {
                             font.pixelSize: ui.caption
                             font.weight: Font.DemiBold
                             font.features: { "tnum": 1 }
-                            color: chip.current ? "#1c1c1e" : ui.label
+                            color: chip.current ? "#1c1c1e" : ui.secondaryLabel
                             verticalAlignment: Text.AlignVCenter
                         }
                         background: Rectangle {
                             radius: height / 2
-                            color: chip.current ? ui.systemOrange : chip.hovered ? ui.fillHover : ui.fill
+                            color: chip.current ? "white" : chip.hovered ? ui.fillHover : ui.fill
                         }
                         onHoveredChanged: {
                             if (hovered) chipPreview.show(chip, root.stillNear(chip.modelData[0], 20))
@@ -936,7 +973,7 @@ FocusScope {
                 // Fades hint that the row scrolls.
                 Rectangle {
                     anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
-                    width: 24
+                    width: 40
                     visible: motionList.contentX > 2
                     gradient: Gradient {
                         orientation: Gradient.Horizontal
@@ -946,7 +983,7 @@ FocusScope {
                 }
                 Rectangle {
                     anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
-                    width: 24
+                    width: 40
                     visible: motionList.contentX + motionList.width < motionList.contentWidth - 2
                     gradient: Gradient {
                         orientation: Gradient.Horizontal
@@ -1005,6 +1042,9 @@ FocusScope {
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             model: root.days
+            currentIndex: root.days.indexOf(root.day)
+            highlightFollowsCurrentItem: false
+            onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
             WheelHandler {
                 acceptedDevices: PointerDevice.Mouse
                 onWheel: function(event) {
@@ -1050,6 +1090,7 @@ FocusScope {
         property real tickEvery: 600
         property bool histogram: false
         property bool showWindow: false
+        property bool showTime: false
         property var tickLabel: function(value) { return "" }
         readonly property real span: Math.max(1, to - from)
         readonly property real hoverAt: hover.hovered ? from + Math.max(0, Math.min(1, hover.point.position.x / width)) * span : -1
@@ -1086,8 +1127,8 @@ FocusScope {
                     height: Math.max(3, parent.height * Math.sqrt(modelData / root.densityMax))
                     y: parent.height - height
                     radius: 1
-                    color: ui.systemOrange
-                    opacity: 0.55 + 0.45 * modelData / root.densityMax
+                    color: ui.label
+                    opacity: 0.3 + 0.45 * modelData / root.densityMax
                 }
             }
             Repeater {  // an hour: each motion recording
@@ -1098,7 +1139,7 @@ FocusScope {
                     x: Math.max(0, line.xOf(modelData[0]))
                     width: Math.max(2, Math.min(line.width, line.xOf(modelData[1])) - x)
                     height: parent.height
-                    color: ui.systemOrange
+                    color: ui.alpha(ui.label, 0.5)
                 }
             }
             Rectangle {  // which hour the close-up below shows
@@ -1106,9 +1147,9 @@ FocusScope {
                 x: line.xOf(root.hourStart)
                 width: Math.max(2, line.xOf(root.hourStart + 3600) - x)
                 height: parent.height
-                color: Qt.rgba(1, 1, 1, 0.07)
+                color: Qt.rgba(1, 1, 1, 0.05)
                 border.width: 1
-                border.color: Qt.rgba(1, 1, 1, 0.45)
+                border.color: Qt.rgba(1, 1, 1, 0.28)
                 radius: 3
             }
             Rectangle {  // hover marker
@@ -1119,17 +1160,47 @@ FocusScope {
                 color: ui.alpha(ui.label, 0.7)
             }
         }
-        Item {  // playhead: white, with a knob, overhanging the track
+        Item {  // playhead: solid white with a knob; the close-up also shows the time
+            objectName: line.showTime ? "hourPlayhead" : "dayPlayhead"
             visible: root.cursor >= 0 && root.position >= line.from && root.position <= line.to
             x: line.xOf(root.position)
             y: 0
-            Rectangle { x: -1; y: 0; width: 2; height: track.height + 8; radius: 1; color: "white" }
+            z: 5
             Rectangle {
-                x: -5; y: -3
-                width: 10; height: 10; radius: 5
+                x: -1.5; y: 0
+                width: 3; height: track.y + track.height + 2
+                radius: 1.5
+                color: "white"
+                border.width: 0.5
+                border.color: Qt.rgba(0, 0, 0, 0.4)
+            }
+            Rectangle {
+                x: -6; y: -4
+                width: 12; height: 12; radius: 6
                 color: "white"
                 border.width: 1
-                border.color: Qt.rgba(0, 0, 0, 0.35)
+                border.color: Qt.rgba(0, 0, 0, 0.45)
+            }
+            Rectangle {
+                objectName: "playheadTime"
+                visible: line.showTime
+                x: Math.max(-parent.x, Math.min(line.width - parent.x - width, -width / 2))
+                y: track.y + track.height + 1
+                width: playheadText.implicitWidth + 12
+                height: 17
+                radius: 8.5
+                color: "white"
+                Text {
+                    id: playheadText
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: root.clock(root.position)
+                    font.family: ui.font
+                    font.pixelSize: ui.caption
+                    font.weight: Font.DemiBold
+                    font.features: { "tnum": 1 }
+                    color: "#1c1c1e"
+                }
             }
         }
         Repeater {
@@ -1166,10 +1237,10 @@ FocusScope {
             }
         }
         HoverHandler { id: hover }
-        MouseArea {
+        MouseArea {  // click to jump, or drag along the track and let go
             x: 0; y: 0; width: parent.width; height: track.y + track.height + 4
             cursorShape: Qt.PointingHandCursor
-            onClicked: function(mouse) {
+            onReleased: function(mouse) {
                 root.forceActiveFocus()
                 root.requestPlay(line.from + Math.max(0, Math.min(1, mouse.x / width)) * line.span)
             }

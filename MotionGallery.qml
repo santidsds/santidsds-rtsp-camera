@@ -46,25 +46,35 @@ FocusScope {
     onTimeFilterChanged: selectedIndex = -1
     property string listenerState: ""
     property string listenerDetails: ""
-    readonly property string today: Qt.formatDate(new Date(), "yyyy-MM-dd")
+    property string today: Qt.formatDate(new Date(), "yyyy-MM-dd")  // refreshed with the list
     signal closed()
     signal openInRecordings(string cameraId, string date, string time)
 
-    // Bursts: consecutive stills from one camera less than a minute apart are one event.
+    // Bursts: stills from one camera less than a minute apart are one event, even when
+    // another camera's stills come in between. `members` are indexes into visibleItems,
+    // newest first; a group is listed at its newest still.
     readonly property var groups: {
-        var result = []
+        var result = [], open = {}
         for (var i = 0; i < visibleItems.length; i++) {
-            var item = visibleItems[i], at = stamp(item), last = result.length ? result[result.length - 1] : null
-            if (last && last.cameraId === (item.cameraId || "") && last.date === item.date
-                    && !isNaN(at) && !isNaN(last.lastStamp) && Math.abs(last.lastStamp - at) <= 60000) {
+            var item = visibleItems[i], at = stamp(item), camera = item.cameraId || "", last = open[camera]
+            if (last && last.date === item.date && !isNaN(at) && !isNaN(last.lastStamp)
+                    && Math.abs(last.lastStamp - at) <= 60000) {
+                last.members.push(i)
                 last.count++
                 last.lastStamp = at
                 continue
             }
-            result.push({first: i, count: 1, cameraId: item.cameraId || "", date: item.date, lastStamp: at,
-                section: isNaN(at) ? "" : Qt.formatDateTime(new Date(at), "yyyy-MM-dd HH")})
+            var group = {first: i, members: [i], count: 1, cameraId: camera, date: item.date, lastStamp: at,
+                section: isNaN(at) ? "" : Qt.formatDateTime(new Date(at), "yyyy-MM-dd HH")}
+            open[camera] = group
+            result.push(group)
         }
         return result
+    }
+    readonly property int selectedGroup: {
+        for (var g = 0; g < groups.length; g++)
+            if (groups[g].members.indexOf(selectedIndex) >= 0) return g
+        return -1
     }
     property int columns: Math.max(2, Math.floor((width - 8) / 190))
     // Rows for the list: a header per hour, then rows of tiles.
@@ -104,9 +114,11 @@ FocusScope {
         var date = section.slice(0, 10), hour = section.slice(11, 13) + ":00"
         return (date !== today ? dayLabel({date: date}) + " · " : "") + hour + " · " + events
     }
+    // The viewer steps event by event (a burst is one step).
     function step(delta) {
-        if (selectedIndex < 0 || visibleItems.length === 0) return
-        selectedIndex = Math.max(0, Math.min(visibleItems.length - 1, selectedIndex + delta))
+        if (selectedIndex < 0 || groups.length === 0) return
+        var next = Math.max(0, Math.min(groups.length - 1, selectedGroup + delta))
+        selectedIndex = groups[next].first
     }
     function cameraLabel(item) {
         return String(item.cameraName || "").slice(0, 64) || strings.t("motion.unknownCamera")
@@ -181,7 +193,9 @@ FocusScope {
 
     function openPreviewInRecordings() {
         if (!clipAvailable) return
-        var item = previewItem
+        // A burst starts at its oldest still.
+        var group = selectedGroup >= 0 ? groups[selectedGroup] : null
+        var item = group ? visibleItems[group.members[group.members.length - 1]] : previewItem
         selectedIndex = -1
         openInRecordings(String(item.cameraId), item.date, item.time)
     }
@@ -227,20 +241,17 @@ FocusScope {
     }
 
     function refresh() {
+        today = Qt.formatDate(new Date(), "yyyy-MM-dd")
         if (lister.running) return
         loading = true
         listError = ""
         lister.running = true
     }
 
+    // Esc closes the viewer; otherwise the panel handles it (leave full screen, then the tab).
     Keys.onEscapePressed: function(event) {
-        if (selectedIndex >= 0) {
-            selectedIndex = -1
-            event.accepted = true
-            return
-        }
-        event.accepted = false
-        closed()
+        event.accepted = selectedIndex >= 0
+        selectedIndex = -1
     }
     Keys.onLeftPressed: function(event) { event.accepted = selectedIndex >= 0; step(-1) }
     Keys.onRightPressed: function(event) { event.accepted = selectedIndex >= 0; step(1) }
@@ -251,6 +262,7 @@ FocusScope {
 
     Process {
         id: lister
+        property string lastListing: ""
         command: ["python3", root.helper, "--list"]
         stdout: StdioCollector { id: listStdout }
         stderr: StdioCollector { id: listStderr }
@@ -261,9 +273,11 @@ FocusScope {
                 root.items = []
                 return
             }
+            if (listStdout.text === lastListing && root.items.length) return  // unchanged: keep the scroll
             try {
                 var parsed = JSON.parse(listStdout.text || "[]")
                 if (!Array.isArray(parsed)) throw new Error()
+                lastListing = listStdout.text
                 root.items = parsed
             } catch (error) {
                 root.listError = strings.t("motion.listUnreadable")
@@ -363,7 +377,7 @@ FocusScope {
             MacSegmented {
                 id: timeFilterControl
                 objectName: "motionTimeFilter"
-                model: [strings.t("motion.all"), strings.t("motion.lastHour"), strings.t("motion.today"), strings.t("motion.lastNight")]
+                model: [strings.t("motion.anyTime"), strings.t("motion.lastHour"), strings.t("motion.today"), strings.t("motion.lastNight")]
                 segmentNames: ["filterAll", "filterHour", "filterToday", "filterNight"]
                 autoSelect: false
                 currentIndex: root.timeFilterKeys.indexOf(root.timeFilter)
@@ -371,6 +385,7 @@ FocusScope {
             }
             MacText {
                 objectName: "motionSubtitle"
+                visible: root.width >= 560
                 text: strings.tn("motion.events", root.groups.length).arg(Commons.I18n.formatNumber(root.groups.length))
                 color: ui.secondaryLabel
                 font.pixelSize: ui.callout
@@ -599,7 +614,7 @@ FocusScope {
             anchors.topMargin: 16
             width: Math.min(implicitWidth, parent.width - 120)
             text: preview.item ? root.cameraLabel(preview.item) + " · " + root.dayLabel(preview.item) + " · "
-                + (preview.item.time || preview.item.name) + "    " + (root.selectedIndex + 1) + " / " + root.visibleItems.length : ""
+                + (preview.item.time || preview.item.name) + "    " + (root.selectedGroup + 1) + " / " + root.groups.length : ""
             color: "white"
             font.pixelSize: ui.callout
             font.weight: Font.DemiBold
@@ -689,7 +704,7 @@ FocusScope {
             anchors.verticalCenter: parent.verticalCenter
             text: ui.iconChevronLeft
             tipText: strings.t("motion.newer")
-            enabled: root.selectedIndex > 0
+            enabled: root.selectedGroup > 0
             onClicked: root.step(-1)
         }
         GlassButton {
@@ -698,7 +713,7 @@ FocusScope {
             anchors.verticalCenter: parent.verticalCenter
             text: ui.iconChevronRight
             tipText: strings.t("motion.older")
-            enabled: root.selectedIndex < root.visibleItems.length - 1
+            enabled: root.selectedGroup < root.groups.length - 1
             onClicked: root.step(1)
         }
     }

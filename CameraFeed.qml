@@ -367,7 +367,8 @@ Item {
                         id: lastMotionText
                         anchors.verticalCenter: parent.verticalCenter
                         textFormat: Text.PlainText
-                        text: strings.t("feed.lastMotion").arg(root.lastMotion)
+                        // Small tiles: just the time.
+                        text: frame.width < 380 ? root.lastMotion : strings.t("feed.lastMotion").arg(root.lastMotion)
                         font.family: ui.font
                         font.pixelSize: ui.callout
                         font.weight: Font.DemiBold

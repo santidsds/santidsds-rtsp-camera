@@ -138,5 +138,6 @@
   "motion.allCameras": "Todas las cámaras",
   "motion.emptyFiltered": "No hay eventos en este período",
   "feed.lastMotion": "Movimiento %1",
-  "feed.lastMotionTip": "Ver el último movimiento en Grabaciones"
+  "feed.lastMotionTip": "Ver el último movimiento en Grabaciones",
+  "motion.anyTime": "Todo"
 }
