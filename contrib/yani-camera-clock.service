@@ -1,0 +1,9 @@
+[Unit]
+Description=yani.camera: keep the cameras' clocks on the PC's time
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.config/omarchy/plugins/yani.camera/camclock.py
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
