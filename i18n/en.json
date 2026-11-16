@@ -139,5 +139,8 @@
   "motion.emptyFiltered": "No events in this period",
   "feed.lastMotion": "Motion %1",
   "feed.lastMotionTip": "Watch the latest motion in Recordings",
-  "motion.anyTime": "All"
+  "motion.anyTime": "All",
+  "recordings.speedTip": "Playback speed",
+  "recordings.speedNormal": "Normal (1×)",
+  "recordings.holdSpeed": "Press and hold the video"
 }

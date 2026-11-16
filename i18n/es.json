@@ -139,5 +139,8 @@
   "motion.emptyFiltered": "No hay eventos en este período",
   "feed.lastMotion": "Movimiento %1",
   "feed.lastMotionTip": "Ver el último movimiento en Grabaciones",
-  "motion.anyTime": "Todo"
+  "motion.anyTime": "Todo",
+  "recordings.speedTip": "Velocidad",
+  "recordings.speedNormal": "Normal (1×)",
+  "recordings.holdSpeed": "Al mantener presionado el video"
 }

@@ -56,7 +56,14 @@ FocusScope {
     property bool chaining: false     // the current session continues the previous one
     property real indexLoadedAt: 0
     property real speed: 1
-    readonly property var speeds: [1, 1.5, 2, 4]
+    readonly property var speeds: [0.25, 0.5, 1, 1.5, 2, 4]
+    // Press and hold the video: play at holdSpeed until let go (the speed menu sets it).
+    property real holdSpeed: 2
+    readonly property var holdSpeeds: [1.5, 2, 4]
+    property bool holding: false
+    property real speedBeforeHold: 1
+    property string seekFlash: ""     // "+10 s" / "−10 s" after a double tap
+    property bool seekFlashForward: true
     property url lastFrame: ""        // the frame on screen when a jump started, shown dimmed
     property bool controlsShown: true
     property string returnTo: ""      // "motion" when opened from a motion still: offer the way back
@@ -303,6 +310,28 @@ FocusScope {
             player.stop()
         }
     }
+    function speedLabel(rate) { return Commons.I18n.formatNumber(rate) + "×" }
+    function speedKey(rate) { return "speed" + String(rate).replace(".", "") }
+    function stepSpeed(direction) {
+        var i = speeds.indexOf(speed)
+        speed = speeds[Math.max(0, Math.min(speeds.length - 1, (i < 0 ? 2 : i) + direction))]
+    }
+    function startHold() {
+        if (holding || playState !== "playing") return
+        speedBeforeHold = speed
+        speed = holdSpeed
+        holding = true
+    }
+    function endHold() {
+        if (!holding) return
+        speed = speedBeforeHold
+        holding = false
+    }
+    function flashSeek(forward) {
+        seekFlashForward = forward
+        seekFlash = forward ? "+10 s" : "−10 s"
+        seekFlashTimer.restart()
+    }
     function showControls() {
         controlsShown = true
         if (immersive) idle.restart()
@@ -335,13 +364,16 @@ FocusScope {
         else if (key === Qt.Key_Down) jumpMotion(1)
         else if (key === Qt.Key_Comma) stepHour(-1)
         else if (key === Qt.Key_Period) stepHour(1)
-        else if (key >= Qt.Key_1 && key <= Qt.Key_4 && !(event.modifiers & Qt.ControlModifier)) speed = speeds[key - Qt.Key_1]
+        else if (key === Qt.Key_BracketLeft || key === Qt.Key_Minus) stepSpeed(-1)
+        else if (key === Qt.Key_BracketRight || key === Qt.Key_Plus || key === Qt.Key_Equal) stepSpeed(1)
+        else if (key === Qt.Key_1 && !(event.modifiers & Qt.ControlModifier)) speed = 1
         else return
         event.accepted = true
         showControls()
     }
 
     Timer { id: debounce; interval: 250; onTriggered: root.startSession() }
+    Timer { id: seekFlashTimer; interval: 650; onTriggered: root.seekFlash = "" }
     Timer {
         id: idle
         interval: 3000
@@ -519,18 +551,90 @@ FocusScope {
             fillMode: VideoOutput.PreserveAspectFit
             visible: root.showingVideo
         }
+        // Gestures (mouse and touch): tap plays/pauses, double tap on the right/left half
+        // jumps ±10 s, press and hold plays at the hold speed until let go.
         MouseArea {
+            id: stageGestures
+            objectName: "recordingGestures"
+            property bool held: false
             anchors.fill: parent
             hoverEnabled: root.immersive
+            pressAndHoldInterval: 450
             cursorShape: root.immersive && !root.controlsShown ? Qt.BlankCursor
                 : root.showingVideo || root.canPlay ? Qt.PointingHandCursor : Qt.ArrowCursor
             onPositionChanged: root.showControls()
-            onClicked: { root.forceActiveFocus(); root.showControls(); singleClick.restart() }
-            onDoubleClicked: { singleClick.stop(); root.fullscreenRequested() }
-            Timer {  // a click plays/pauses unless it was the first half of a double-click
+            onPressed: held = false
+            onPressAndHold: if (root.playState === "playing") { held = true; singleClick.stop(); root.startHold() }
+            onReleased: if (held) root.endHold()
+            onCanceled: if (held) { held = false; root.endHold() }
+            onClicked: {
+                if (held) { held = false; return }
+                root.forceActiveFocus()
+                root.showControls()
+                singleClick.restart()
+            }
+            onDoubleClicked: function(mouse) {
+                singleClick.stop()
+                if (!root.showingVideo && root.playState !== "connecting") return
+                var forward = mouse.x >= width / 2
+                root.seekBy(forward ? 10 : -10)
+                root.flashSeek(forward)
+            }
+            Timer {  // a tap plays/pauses unless it was the first half of a double tap
                 id: singleClick
                 interval: 220
                 onTriggered: if (root.showingVideo || (root.canPlay && root.playState !== "connecting")) root.togglePlay()
+            }
+        }
+        // Gesture feedback: the jump, or the hold speed.
+        Rectangle {
+            objectName: "seekFlash"
+            visible: root.seekFlash !== ""
+            anchors.verticalCenter: parent.verticalCenter
+            x: root.seekFlashForward ? parent.width * 0.75 - width / 2 : parent.width * 0.25 - width / 2
+            width: seekFlashText.implicitWidth + 28
+            height: 40
+            radius: height / 2
+            color: Qt.rgba(0, 0, 0, 0.55)
+            MacText {
+                id: seekFlashText
+                anchors.centerIn: parent
+                text: root.seekFlash
+                color: "white"
+                font.pixelSize: ui.headline
+                font.weight: Font.DemiBold
+            }
+        }
+        Rectangle {
+            objectName: "holdBadge"
+            visible: root.holding
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            anchors.topMargin: 12
+            width: holdRow.implicitWidth + 26
+            height: 30
+            radius: height / 2
+            color: Qt.rgba(0, 0, 0, 0.6)
+            border.width: 1
+            border.color: Qt.rgba(1, 1, 1, 0.14)
+            Row {
+                id: holdRow
+                anchors.centerIn: parent
+                spacing: 6
+                MacText {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.speedLabel(root.holdSpeed)
+                    color: "white"
+                    font.weight: Font.DemiBold
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: ui.iconForward
+                    font.family: ui.iconFont
+                    font.pixelSize: 15
+                    color: "white"
+                }
             }
         }
 
@@ -689,11 +793,15 @@ FocusScope {
             spacing: 8
 
             RowLayout {
+                id: transportBar
+                // Equal sides keep the play controls centred.
+                readonly property real leftWidth: Math.max(dayMenuButton.visible ? dayMenuButton.implicitWidth : 0,
+                    motionCount.visible ? motionCount.implicitWidth : 0)
+                readonly property real sideWidth: Math.max(leftWidth, speedButton.implicitWidth)
                 Layout.fillWidth: true
                 spacing: 8
                 Item {
-                    Layout.preferredWidth: root.narrow && !root.immersive ? 0
-                        : Math.max(dayMenuButton.visible ? dayMenuButton.implicitWidth : 0, motionCount.implicitWidth)
+                    Layout.preferredWidth: transportBar.sideWidth
                     implicitHeight: transport.height
                     Controls.Button {
                         id: dayMenuButton
@@ -777,7 +885,7 @@ FocusScope {
                     }
                 }
                 Item { Layout.fillWidth: true }
-                // One glass capsule: transport, then speed.
+                // The play controls, centred in one capsule.
                 Rectangle {
                     id: transport
                     implicitWidth: transportRow.implicitWidth + 16
@@ -849,24 +957,141 @@ FocusScope {
                             enabled: root.motion.length > 0 && root.indexState === "ready"
                             onClicked: { root.forceActiveFocus(); root.jumpMotion(1) }
                         }
-                        Rectangle { width: 1; height: 20; color: ui.separator; Layout.leftMargin: 4; Layout.rightMargin: 4 }
-                        MacSegmented {
-                            id: speedControl
-                            objectName: "recordingSpeed"
-                            model: root.speeds.map(function(rate) { return Commons.I18n.formatNumber(rate) + "×" })
-                            tips: root.speeds.map(function(rate, i) {
-                                return strings.t("recordings.speed").arg(Commons.I18n.formatNumber(rate)) + " (" + (i + 1) + ")" })
-                            segmentNames: ["speed1", "speed15", "speed2", "speed4"]
-                            autoSelect: false
-                            currentIndex: root.speeds.indexOf(root.speed)
-                            onActivated: function(index) { root.speed = root.speeds[index]; root.forceActiveFocus() }
-                        }
                     }
                 }
                 Item { Layout.fillWidth: true }
+                // Speed: a button that opens a menu (speeds, and the press-and-hold speed).
                 Item {
-                    Layout.preferredWidth: root.narrow && !root.immersive ? 0
-                        : Math.max(dayMenuButton.visible ? dayMenuButton.implicitWidth : 0, motionCount.implicitWidth)
+                    Layout.preferredWidth: transportBar.sideWidth
+                    implicitHeight: transport.height
+                    Controls.Button {
+                        id: speedButton
+                        objectName: "recordingSpeedButton"
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        implicitHeight: 30
+                        leftPadding: 12
+                        rightPadding: 9
+                        hoverEnabled: true
+                        focusPolicy: Qt.NoFocus
+                        Accessible.name: strings.t("recordings.speedTip")
+                        contentItem: Row {
+                            spacing: 5
+                            MacText {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.speedLabel(root.speed)
+                                color: root.immersive ? "white" : ui.label
+                                font.weight: Font.DemiBold
+                                font.features: { "tnum": 1 }
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                textFormat: Text.PlainText
+                                text: ui.iconChevronDown
+                                rotation: 180
+                                font.family: ui.iconFont
+                                font.pixelSize: 14
+                                color: root.immersive ? Qt.rgba(1, 1, 1, 0.7) : ui.secondaryLabel
+                            }
+                        }
+                        background: Rectangle {
+                            radius: height / 2
+                            color: speedMenu.opened || speedButton.hovered
+                                ? (root.immersive ? Qt.rgba(1, 1, 1, 0.18) : ui.fillHover)
+                                : (root.immersive ? Qt.rgba(1, 1, 1, 0.10) : ui.fill)
+                        }
+                        PanelToolTip {
+                            visible: speedButton.hovered && !speedMenu.opened
+                            text: strings.t("recordings.speedTip") + " ([ ])"
+                            fontSize: Style.font.caption
+                        }
+                        onClicked: speedMenu.opened ? speedMenu.close() : speedMenu.open()
+                        PointerArea {}
+                        Controls.Popup {
+                            id: speedMenu
+                            objectName: "recordingSpeedMenu"
+                            focus: true
+                            onClosed: root.forceActiveFocus()
+                            x: parent.width - width
+                            y: -height - 6
+                            width: 214
+                            padding: 6
+                            background: Rectangle {
+                                radius: 10
+                                color: ui.menuBackground
+                                border.width: 1
+                                border.color: ui.separator
+                            }
+                            contentItem: Column {
+                                spacing: 2
+                                MacText {
+                                    leftPadding: 8
+                                    topPadding: 2
+                                    bottomPadding: 2
+                                    text: strings.t("recordings.speedTip")
+                                    color: ui.secondaryLabel
+                                    font.pixelSize: ui.caption
+                                    font.weight: Font.DemiBold
+                                }
+                                Repeater {
+                                    model: root.speeds
+                                    Controls.ItemDelegate {
+                                        id: speedRow
+                                        required property real modelData
+                                        objectName: root.speedKey(modelData)
+                                        width: 202
+                                        height: 28
+                                        hoverEnabled: true
+                                        contentItem: Row {
+                                            spacing: 6
+                                            Text {
+                                                width: 16
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                textFormat: Text.PlainText
+                                                text: speedRow.modelData === root.speed ? ui.iconCheck : ""
+                                                font.family: ui.iconFont
+                                                font.pixelSize: 13
+                                                color: speedRow.hovered ? ui.onAccent : ui.label
+                                            }
+                                            MacText {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                text: speedRow.modelData === 1 ? strings.t("recordings.speedNormal") : root.speedLabel(speedRow.modelData)
+                                                color: speedRow.hovered ? ui.onAccent : ui.label
+                                                font.features: { "tnum": 1 }
+                                            }
+                                        }
+                                        background: Rectangle { radius: 5; color: speedRow.hovered ? ui.accent : "transparent" }
+                                        onClicked: { root.speed = speedRow.modelData; speedMenu.close() }
+                                    }
+                                }
+                                Rectangle { width: 202; height: 1; color: ui.separator }
+                                MacText {
+                                    leftPadding: 8
+                                    topPadding: 4
+                                    text: strings.t("recordings.holdSpeed")
+                                    color: ui.secondaryLabel
+                                    font.pixelSize: ui.caption
+                                    font.weight: Font.DemiBold
+                                }
+                                Row {
+                                    leftPadding: 6
+                                    topPadding: 2
+                                    bottomPadding: 2
+                                    spacing: 6
+                                    Repeater {
+                                        model: root.holdSpeeds
+                                        MacButton {
+                                            required property real modelData
+                                            objectName: "hold" + String(modelData).replace(".", "")
+                                            text: root.speedLabel(modelData)
+                                            role: root.holdSpeed === modelData ? "default" : "normal"
+                                            onClicked: root.holdSpeed = modelData
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
